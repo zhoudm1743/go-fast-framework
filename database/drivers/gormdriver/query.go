@@ -43,15 +43,32 @@ func (q *GormQuery) Schema(name string) contracts.Query {
 	return &GormQuery{db: q.db, schema: name}
 }
 
+// GetSchema 返回当前查询上下文的 schema 名称（PostgreSQL 多 schema 场景）。
+// 无 schema 上下文时返回空字符串。
+// 业务代码需要在原生 SQL 中拼接 schema 限定的表名时使用此方法。
+func (q *GormQuery) GetSchema() string {
+	return q.schema
+}
+
 // applySchema 在终结方法（First/Find/Create 等）执行前，
-// 如果设置了 schema 且 dest 是可解析的 GORM model，
-// 则自动在 db 上调用 Table(schema.tableName)。
+// 如果设置了 schema：
+//  1. 通过 SET search_path 让 PostgreSQL 自动将裸表名解析到租户 schema，
+//     确保所有子查询（Joins、Preloads、关联等）无需单独处理就能找到正确的表。
+//  2. 如果 dest 是可解析的 GORM model，额外设置 Table(schema.tableName)
+//     作为双重保险（对主表显式指定 schema）。
 func (q *GormQuery) applySchema(dest any) *gorm.DB {
-	if q.schema != "" && dest != nil {
-		stmt := &gorm.Statement{DB: q.db}
-		if err := stmt.Parse(dest); err == nil && stmt.Table != "" && !strings.Contains(stmt.Table, ".") {
-			return q.db.Table(q.schema + "." + stmt.Table)
+	if q.schema != "" {
+		db := q.db.Exec("SET search_path TO " + q.schema + ", public")
+		if dest != nil {
+			stmt := &gorm.Statement{DB: db}
+			if err := stmt.Parse(dest); err == nil && stmt.Table != "" && !strings.Contains(stmt.Table, ".") {
+				return db.Table(q.schema + "." + stmt.Table)
+			}
 		}
+		return db
+	}
+	if dest != nil {
+		return q.db
 	}
 	return q.db
 }
@@ -124,6 +141,30 @@ func (q *GormQuery) Joins(query string, args ...any) contracts.Query {
 }
 
 func (q *GormQuery) Preload(query string, args ...any) contracts.Query {
+	if q.schema != "" {
+		schema := q.schema
+		// Preload 生成的子查询不会继承 Tenant() 设置的 schema，
+		// 需要在回调中手动设置 Table(schema.table)。
+		schemaCb := func(db *gorm.DB) *gorm.DB {
+			if db.Statement.Table != "" && !strings.Contains(db.Statement.Table, ".") {
+				return db.Table(schema + "." + db.Statement.Table)
+			}
+			return db
+		}
+		hasCallback := false
+		for i, a := range args {
+			if existing, ok := a.(func(*gorm.DB) *gorm.DB); ok {
+				args[i] = func(db *gorm.DB) *gorm.DB {
+					return existing(schemaCb(db))
+				}
+				hasCallback = true
+				break
+			}
+		}
+		if !hasCallback {
+			args = append(args, schemaCb)
+		}
+	}
 	return q.wrap(q.db.Preload(query, args...))
 }
 

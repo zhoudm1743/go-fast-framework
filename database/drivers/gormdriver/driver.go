@@ -21,7 +21,8 @@ import (
 
 // GormDriver 实现 contracts.Driver
 type GormDriver struct {
-	db *gorm.DB
+	db     *gorm.DB
+	schema string // PostgreSQL schema（用于 AutoMigrate 时显式 SET search_path）
 }
 
 var _ contracts.Driver = (*GormDriver)(nil)
@@ -111,7 +112,7 @@ func NewGormDriver(cfg contracts.ConnectionConfig, log contracts.Log) (*GormDriv
 		return nil, fmt.Errorf("[GoFast] gormdriver driver: database ping failed: %w", err)
 	}
 
-	return &GormDriver{db: db}, nil
+	return &GormDriver{db: db, schema: cfg.Schema}, nil
 }
 
 func (d *GormDriver) Query(ctx ...context.Context) contracts.Query {
@@ -143,7 +144,17 @@ func (d *GormDriver) Close() error {
 }
 
 func (d *GormDriver) AutoMigrate(models ...any) error {
-	return d.db.AutoMigrate(models...)
+	if d.schema == "" {
+		return d.db.AutoMigrate(models...)
+	}
+	// PostgreSQL 多租户：在事务内显式 SET LOCAL search_path，
+	// 确保 AutoMigrate 的 DDL 在正确的 schema 执行，不依赖连接池的 DSN 初始化值。
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(fmt.Sprintf(`SET LOCAL search_path TO "%s"`, d.schema)).Error; err != nil {
+			return fmt.Errorf("set search_path failed: %w", err)
+		}
+		return tx.AutoMigrate(models...)
+	})
 }
 
 // RawDB 逃生口：允许高级用户直接获取 *gorm.DB（不推荐常规使用）。

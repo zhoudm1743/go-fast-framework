@@ -177,6 +177,11 @@ type Query interface {
 	// 示例：facades.DB().Connection("pg").Schema("analytics").Model(&Event{}).Find(&events)
 	Schema(name string) Query
 
+	// GetSchema 获取当前查询上下文的 schema 名称。
+	// 多 schema 场景（如 PostgreSQL 多租户）下用于原生 SQL 拼接完整表名。
+	// 无 schema 上下文时返回空字符串。
+	GetSchema() string
+
 	// ── 悲观锁 ──────────────────────────────────────────────
 	Lock(mode LockMode) Query
 
@@ -217,6 +222,10 @@ type Driver interface {
 type DB interface {
 	// Query 在默认连接上返回查询构建器
 	Query(ctx ...context.Context) Query
+	// Tenant 在默认连接上返回已自动设置好 schema 的查询构建器。
+	// 等价于 Query().Schema(TenantResolver.SchemaFromCtx(ctx))。
+	// 业务层推荐直接使用此方法，避免重复的样板代码。
+	Tenant(ctx Context) Query
 	// Connection 切换到指定命名连接，返回该连接的查询构建器
 	Connection(name string) Query
 	// Driver 获取默认（或指定）连接的底层驱动
