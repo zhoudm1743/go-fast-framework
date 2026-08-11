@@ -3,8 +3,11 @@ package gin
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"path"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -212,6 +215,78 @@ func (r *route) Static(urlPrefix, dir string) contracts.Route {
 // StaticFS 从任意 http.FileSystem 提供静态文件服务（支持 http.FS(embed.FS)）。
 func (r *route) StaticFS(urlPrefix string, fs http.FileSystem) contracts.Route {
 	r.router.StaticFS(urlPrefix, fs)
+	return r
+}
+
+// SPA 挂载单页应用（全站兜底，必须最后注册）。
+func (r *route) SPA(fsys fs.FS, root string) contracts.Route {
+	sub := fsys
+	if root != "" && root != "." {
+		s, err := fs.Sub(fsys, root)
+		if err != nil {
+			r.log.Warnf("[GoFast/gin] SPA disabled: fs.Sub(%q) failed: %v", root, err)
+			return r
+		}
+		sub = s
+	}
+	if _, err := fs.Stat(sub, "index.html"); err != nil {
+		r.log.Warnf("[GoFast/gin] SPA disabled: index.html not found")
+		return r
+	}
+	fileServer := http.FileServer(http.FS(sub))
+	r.engine.NoRoute(func(c *gin.Context) {
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		p := strings.TrimPrefix(path.Clean("/"+c.Request.URL.Path), "/")
+		if p == "" {
+			p = "index.html"
+		}
+		if f, err := sub.Open(p); err == nil {
+			_ = f.Close()
+			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		c.Request.URL.Path = "/"
+		fileServer.ServeHTTP(c.Writer, c.Request)
+	})
+	r.log.Info("[GoFast/gin] SPA mounted on /")
+	return r
+}
+
+// StaticSPA 在指定 URL 前缀挂载单页应用。
+func (r *route) StaticSPA(prefix string, fsys fs.FS, root string) contracts.Route {
+	sub := fsys
+	if root != "" && root != "." {
+		s, err := fs.Sub(fsys, root)
+		if err != nil {
+			r.log.Warnf("[GoFast/gin] StaticSPA disabled: fs.Sub(%q) failed: %v", root, err)
+			return r
+		}
+		sub = s
+	}
+	if _, err := fs.Stat(sub, "index.html"); err != nil {
+		r.log.Warnf("[GoFast/gin] StaticSPA disabled: index.html not found")
+		return r
+	}
+	prefix = "/" + strings.Trim(prefix, "/")
+	fileServer := http.FileServer(http.FS(sub))
+	handler := func(c *gin.Context) {
+		p := strings.TrimPrefix(path.Clean("/"+c.Request.URL.Path), "/")
+		if f, err := sub.Open(p); err == nil {
+			_ = f.Close()
+			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		c.Request.URL.Path = "/"
+		fileServer.ServeHTTP(c.Writer, c.Request)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		r.engine.Handle(method, prefix, handler)
+		r.engine.Handle(method, prefix+"/*filepath", handler)
+	}
+	r.log.Infof("[GoFast/gin] StaticSPA mounted on %s", prefix)
 	return r
 }
 

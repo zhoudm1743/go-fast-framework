@@ -3,6 +3,7 @@ package contracts
 import (
 	"html/template"
 	"io"
+	"io/fs"
 	"net/http"
 	"time"
 )
@@ -195,7 +196,34 @@ type Route interface {
 	// 配合 go:embed 使用：StaticFS("/static", http.FS(embeddedSubFS))
 	StaticFS(urlPrefix string, fs http.FileSystem) Route
 
-	// ── 高级特性 ───────────────────────────────────
+	// SPA 挂载单页应用（全站兜底，必须最后注册）。
+	//
+	// 参数：
+	//   - fsys: 静态文件源（通常为 embed.FS）
+	//   - root: fsys 内的子目录（如 "dist"）；fsys 本身即为根时传 "" 或 "."
+	//
+	// 行为：
+	//   - 已注册的 API/静态路由优先匹配，不会被覆盖。
+	//   - 请求路径存在对应文件 → 返回文件。
+	//   - 请求路径未命中文件 → 返回 index.html（history 回退）。
+	//   - 仅处理 GET / HEAD；其他方法返回 404。
+	//   - fsys 内不存在 index.html → 跳过挂载并 Warn 日志。
+	SPA(fsys fs.FS, root string) Route
+
+	// StaticSPA 在指定 URL 前缀挂载单页应用（如 /h5）。
+	//
+	// 参数：
+	//   - prefix: URL 前缀（如 "/h5"）
+	//   - fsys: 静态文件源
+	//   - root: fsys 内子目录（如 "h5"）
+	//
+	// 行为：
+	//   - 仅处理 prefix 下的 GET / HEAD。
+	//   - 文件存在 → 返回文件；不存在 → index.html。
+	//   - 需在 SPA 全站兜底之前注册。
+	StaticSPA(prefix string, fsys fs.FS, root string) Route
+
+	// ── 高级特性 ──────────────────────────────────
 	// Routes 获取所有路由。
 	Routes() []RouteInfo
 	// Route 获取指定路径的路由。

@@ -3,6 +3,7 @@ package fiber
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"runtime/debug"
 	"time"
@@ -204,6 +205,56 @@ func (r *route) StaticFS(urlPrefix string, fs http.FileSystem) contracts.Route {
 		Root:   fs,
 		Browse: false,
 	}))
+	return r
+}
+
+// SPA 挂载单页应用（全站兜底，必须最后注册）。
+func (r *route) SPA(fsys fs.FS, root string) contracts.Route {
+	sub := fsys
+	if root != "" && root != "." {
+		s, err := fs.Sub(fsys, root)
+		if err != nil {
+			r.log.Warnf("[GoFast/fiber] SPA disabled: fs.Sub(%q) failed: %v", root, err)
+			return r
+		}
+		sub = s
+	}
+	if _, err := fs.Stat(sub, "index.html"); err != nil {
+		r.log.Warnf("[GoFast/fiber] SPA disabled: index.html not found")
+		return r
+	}
+	r.app.Use(filesystem.New(filesystem.Config{
+		Root:         http.FS(sub),
+		Index:        "index.html",
+		NotFoundFile: "index.html",
+		MaxAge:       3600,
+	}))
+	r.log.Info("[GoFast/fiber] SPA mounted on /")
+	return r
+}
+
+// StaticSPA 在指定 URL 前缀挂载单页应用。
+func (r *route) StaticSPA(prefix string, fsys fs.FS, root string) contracts.Route {
+	sub := fsys
+	if root != "" && root != "." {
+		s, err := fs.Sub(fsys, root)
+		if err != nil {
+			r.log.Warnf("[GoFast/fiber] StaticSPA disabled: fs.Sub(%q) failed: %v", root, err)
+			return r
+		}
+		sub = s
+	}
+	if _, err := fs.Stat(sub, "index.html"); err != nil {
+		r.log.Warnf("[GoFast/fiber] StaticSPA disabled: index.html not found")
+		return r
+	}
+	r.app.Use(prefix, filesystem.New(filesystem.Config{
+		Root:         http.FS(sub),
+		Index:        "index.html",
+		NotFoundFile: "index.html",
+		MaxAge:       3600,
+	}))
+	r.log.Infof("[GoFast/fiber] StaticSPA mounted on %s", prefix)
 	return r
 }
 
