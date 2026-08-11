@@ -166,29 +166,13 @@ func (m *dbManager) Query(ctx ...context.Context) contracts.Query {
 
 // Tenant 返回已按当前请求自动设置好 schema 的查询构建器。
 // 等价于 Query().Schema(TenantResolver.SchemaFromCtx(ctx))。
-//
-// 同时会把 ctx.Value("user_id") 透传到 gorm 的 WithContext 中，
-// 供 audit callback（created_by / updated_by）以及业务自定义 hook 使用。
+// 业务层推荐直接使用此方法，避免重复的样板代码。
 func (m *dbManager) Tenant(ctx contracts.Context) contracts.Query {
 	var schema string
 	if resolver := contracts.GlobalTenantResolver(); resolver != nil {
 		schema = resolver.SchemaFromCtx(ctx)
 	}
-	goCtx := buildAuditContext(ctx)
-	return m.Query(goCtx).Schema(schema)
-}
-
-// buildAuditContext 把 contracts.Context 中常用的审计字段（user_id）放入标准 context.Context。
-// gormdriver 的 audit callback 会读取该 context 自动填充 created_by / updated_by。
-func buildAuditContext(ctx contracts.Context) context.Context {
-	goCtx := context.Background()
-	if ctx == nil {
-		return goCtx
-	}
-	if uid, ok := ctx.Value("user_id").(string); ok && uid != "" {
-		goCtx = context.WithValue(goCtx, contracts.CtxKeyUserID, uid)
-	}
-	return goCtx
+	return m.Query().Schema(schema)
 }
 
 func (m *dbManager) Connection(name string) contracts.Query {

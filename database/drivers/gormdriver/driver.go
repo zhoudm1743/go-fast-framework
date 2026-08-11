@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
@@ -22,9 +21,8 @@ import (
 
 // GormDriver 实现 contracts.Driver
 type GormDriver struct {
-	db        *gorm.DB
-	schema    string // PostgreSQL schema（用于 AutoMigrate 时显式 SET search_path）
-	auditOnce sync.Once
+	db     *gorm.DB
+	schema string // PostgreSQL schema（用于 AutoMigrate 时显式 SET search_path）
 }
 
 var _ contracts.Driver = (*GormDriver)(nil)
@@ -118,9 +116,6 @@ func NewGormDriver(cfg contracts.ConnectionConfig, log contracts.Log) (*GormDriv
 }
 
 func (d *GormDriver) Query(ctx ...context.Context) contracts.Query {
-	d.auditOnce.Do(func() {
-		registerAuditCallbacks(d.db)
-	})
 	db := d.db.Session(&gorm.Session{NewDB: true})
 	if len(ctx) > 0 && ctx[0] != nil {
 		db = db.WithContext(ctx[0])
