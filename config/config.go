@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -34,7 +35,7 @@ var (
 func Add(namespace string, config map[string]any) {
 	addMu.Lock()
 	defer addMu.Unlock()
-	pendingAdds = append(pendingAdds, pendingAdd{namespace, config})
+	pendingAdds = append(pendingAdds, pendingAdd{namespace, cloneConfigMap(config)})
 }
 
 // GetRegistry 返回当前已注册的命名空间配置副本（用于测试）。
@@ -43,7 +44,7 @@ func GetRegistry() map[string]map[string]any {
 	defer addMu.RUnlock()
 	result := make(map[string]map[string]any, len(pendingAdds))
 	for _, pa := range pendingAdds {
-		result[pa.namespace] = pa.config
+		result[pa.namespace] = cloneConfigMap(pa.config)
 	}
 	return result
 }
@@ -171,7 +172,11 @@ func (c *configImpl) GetStringMap(key string, defaultValue ...map[string]any) ma
 		}
 		return nil
 	}
-	return c.viper.GetStringMap(key)
+	val := c.viper.Get(key)
+	if m, ok := toStringAnyMap(val); ok {
+		return m
+	}
+	return nil
 }
 
 // Set 运行时设置配置值（不持久化到文件）。
@@ -207,10 +212,64 @@ func setDefaultMap(v *viper.Viper, prefix string, m map[string]any) {
 		if prefix != "" {
 			key = prefix + "." + k
 		}
-		if sub, ok := val.(map[string]any); ok {
-			setDefaultMap(v, key, sub)
-			continue
-		}
-		v.SetDefault(key, val)
+		setDefaultValue(v, key, val)
 	}
+}
+
+// setDefaultValue 写入单个配置值；map 类型递归展开为点号键。
+func setDefaultValue(v *viper.Viper, key string, val any) {
+	if nested, ok := toStringAnyMap(val); ok {
+		for k, subVal := range nested {
+			setDefaultValue(v, key+"."+k, subVal)
+		}
+		return
+	}
+	v.SetDefault(key, val)
+}
+
+// toStringAnyMap 将任意 map 类型转为 map[string]any；非 map 返回 false。
+func toStringAnyMap(val any) (map[string]any, bool) {
+	if val == nil {
+		return nil, false
+	}
+	rv := reflect.ValueOf(val)
+	for rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil, false
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Map {
+		return nil, false
+	}
+	out := make(map[string]any, rv.Len())
+	for _, key := range rv.MapKeys() {
+		var k string
+		if key.Kind() == reflect.String {
+			k = key.String()
+		} else {
+			k = fmt.Sprint(key.Interface())
+		}
+		out[k] = rv.MapIndex(key).Interface()
+	}
+	return out, true
+}
+
+// cloneConfigMap 深拷贝配置 map（map 递归克隆，其余值按引用复制）。
+func cloneConfigMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = cloneConfigValue(v)
+	}
+	return out
+}
+
+func cloneConfigValue(v any) any {
+	if nested, ok := toStringAnyMap(v); ok {
+		return cloneConfigMap(nested)
+	}
+	return v
 }

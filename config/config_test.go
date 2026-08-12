@@ -266,6 +266,148 @@ func TestGetStringMap_MissingKey_NoDefault(t *testing.T) {
 	}
 }
 
+func TestGetStringMap_MapStringString_Set(t *testing.T) {
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Set("headers", map[string]string{"X-Request-Id": "abc", "Accept": "json"})
+	v := cfg.GetStringMap("headers")
+	if v["X-Request-Id"] != "abc" || v["Accept"] != "json" {
+		t.Fatalf("Set map[string]string 后 GetStringMap 应可读，得到 %v", v)
+	}
+}
+
+func TestGetStringMap_MapStringString_Add(t *testing.T) {
+	resetPendingAdds()
+	defer resetPendingAdds()
+
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Add("database", map[string]any{
+		"connections": map[string]string{"main": "sqlite", "slave": "mysql"},
+	})
+	v := cfg.GetStringMap("database.connections")
+	if v["main"] != "sqlite" || v["slave"] != "mysql" {
+		t.Fatalf("Add 嵌套 map[string]string 后 GetStringMap 应可读，得到 %v", v)
+	}
+}
+
+func TestGetStringMap_MapStringInt_Set(t *testing.T) {
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Set("limits", map[string]int{"max": 100, "min": 1})
+	v := cfg.GetStringMap("limits")
+	if v["max"] != 100 || v["min"] != 1 {
+		t.Fatalf("Set map[string]int 后 GetStringMap 应可读，得到 %v", v)
+	}
+}
+
+func TestGetStringMap_ScalarReturnsNil(t *testing.T) {
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Set("notamap", "hello")
+	if v := cfg.GetStringMap("notamap"); v != nil {
+		t.Fatalf("标量值应返回 nil，得到 %v", v)
+	}
+}
+
+func TestGetStringMap_EmptyMap(t *testing.T) {
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Set("empty", map[string]any{})
+	v := cfg.GetStringMap("empty")
+	if v == nil {
+		t.Fatal("空 map 应返回非 nil 的空 map")
+	}
+	if len(v) != 0 {
+		t.Fatalf("期望空 map，得到 %v", v)
+	}
+}
+
+func TestAdd_MapStringInt(t *testing.T) {
+	resetPendingAdds()
+	defer resetPendingAdds()
+
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Add("app", map[string]any{
+		"limits": map[string]int{"max": 100, "min": 1},
+	})
+	if v := cfg.GetInt("app.limits.max"); v != 100 {
+		t.Fatalf("期望 100，得到 %v", v)
+	}
+	if v := cfg.GetInt("app.limits.min"); v != 1 {
+		t.Fatalf("期望 1，得到 %v", v)
+	}
+}
+
+func TestAdd_MapStringBool(t *testing.T) {
+	resetPendingAdds()
+	defer resetPendingAdds()
+
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Add("flags", map[string]any{
+		"switches": map[string]bool{"debug": true, "trace": false},
+	})
+	if v := cfg.GetBool("flags.switches.debug"); !v {
+		t.Fatal("期望 true")
+	}
+	if v := cfg.GetBool("flags.switches.trace"); v {
+		t.Fatal("期望 false")
+	}
+}
+
+func TestAdd_NestedTypedMaps(t *testing.T) {
+	resetPendingAdds()
+	defer resetPendingAdds()
+
+	path := tempConfigFile(t, "")
+	cfg, _ := NewConfig(path)
+	cfg.Add("db", map[string]any{
+		"connections": map[string]any{
+			"main": map[string]string{"driver": "gorm", "engine": "sqlite"},
+		},
+	})
+	if v := cfg.GetString("db.connections.main.driver"); v != "gorm" {
+		t.Fatalf("期望 gorm，得到 %v", v)
+	}
+	if v := cfg.GetString("db.connections.main.engine"); v != "sqlite" {
+		t.Fatalf("期望 sqlite，得到 %v", v)
+	}
+}
+
+func TestGetRegistry_DeepCopy(t *testing.T) {
+	resetPendingAdds()
+	defer resetPendingAdds()
+
+	original := map[string]any{
+		"name": "GoFast",
+		"pool": map[string]any{"size": 10},
+	}
+	Add("app", original)
+
+	registry := GetRegistry()
+	registry["app"]["name"] = "mutated"
+	if sub, ok := registry["app"]["pool"].(map[string]any); ok {
+		sub["size"] = 999
+	}
+
+	registry2 := GetRegistry()
+	if registry2["app"]["name"] != "GoFast" {
+		t.Fatalf("外层 map 应隔离，期望 GoFast，得到 %v", registry2["app"]["name"])
+	}
+	pool, ok := registry2["app"]["pool"].(map[string]any)
+	if !ok || pool["size"] != 10 {
+		t.Fatalf("嵌套 map 应隔离，得到 %v", registry2["app"]["pool"])
+	}
+
+	original["name"] = "changed-in-source"
+	registry3 := GetRegistry()
+	if registry3["app"]["name"] != "GoFast" {
+		t.Fatalf("源 map 变更不应影响注册表，得到 %v", registry3["app"]["name"])
+	}
+}
+
 // ── Env 测试 ──────────────────────────────────────────────────────────
 
 func TestEnv_ExistingVar(t *testing.T) {
