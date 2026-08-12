@@ -93,10 +93,18 @@ func (a *application) SetProviders(providers []ServiceProvider) {
 	a.providers = providers
 }
 
+// AppSetter 由 faades 包在 init() 中注入，Boot() 阶段自动调用。
+// 避免 foundation 直接 import facades 产生循环依赖。
+var AppSetter func(Application)
+
 func (a *application) Boot() {
 	// ── 幂等检查：使用 CAS 确保仅首次调用者执行引导 ──────────────────
 	if !a.booted.CompareAndSwap(false, true) {
 		return
+	}
+
+	if AppSetter != nil {
+		AppSetter(a)
 	}
 
 	a.mu.Lock()

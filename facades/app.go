@@ -4,6 +4,10 @@ import "github.com/zhoudm1743/go-fast-framework/foundation"
 
 var app foundation.Application
 
+func init() {
+	foundation.AppSetter = SetApp
+}
+
 // SetApp 设置全局 Application 实例（框架启动时调用一次）。
 func SetApp(a foundation.Application) {
 	app = a
