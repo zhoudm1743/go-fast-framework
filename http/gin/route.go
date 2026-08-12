@@ -429,7 +429,7 @@ func newLogWriter(log contracts.Log, isErr bool) *logWriter {
 }
 
 func (w *logWriter) Write(p []byte) (n int, err error) {
-	msg := fmt.Sprintf("[GoFast/gin] %s", string(p))
+	msg := fmt.Sprintf("[GoFast/gin] %s", strings.TrimRight(string(p), "\n\r"))
 	if w.isErr {
 		w.log.Error(msg)
 	} else {

@@ -31,7 +31,7 @@ type logEntry struct {
 
 // callerFields 通过 runtime.Callers 获取调用者信息，自动跳过 logger.go 内部包装帧。
 func callerFields() []zapcore.Field {
-	const loggerSource = "framework/log/logger.go"
+	const loggerSource = "/log/logger.go"
 
 	pcs := make([]uintptr, 32)
 	n := runtime.Callers(2, pcs) // 跳过 runtime.Callers 与 callerFields 自身
@@ -67,7 +67,7 @@ func unknownCallerFields() []zapcore.Field {
 }
 
 func shorten(file string, ok bool) string {
-	if !ok {
+	if !ok || file == "" {
 		return "unknown"
 	}
 	return filepath.ToSlash(filepath.Clean(file))
@@ -119,8 +119,6 @@ func NewLogger(cfg contracts.Config) (contracts.Log, error) {
 	}
 
 	z := zap.New(core,
-		zap.AddCaller(),           // 兜底 caller
-		zap.AddCallerSkip(1),      // 跳过 zap 自身包装
 		zap.AddStacktrace(zapcore.FatalLevel), // Fatal 及以上记录调用栈
 	)
 
@@ -263,9 +261,12 @@ type fieldMergeCore struct {
 }
 
 func (c *fieldMergeCore) With(fields []zapcore.Field) zapcore.Core {
+	merged := make([]zapcore.Field, len(c.prefixFields)+len(fields))
+	copy(merged, c.prefixFields)
+	copy(merged[len(c.prefixFields):], fields)
 	return &fieldMergeCore{
-		Core:         c.Core.With(fields),
-		prefixFields: append(c.prefixFields, fields...),
+		Core:         c.Core.With(nil),
+		prefixFields: merged,
 	}
 }
 
@@ -391,9 +392,9 @@ func displayCaller(caller string) string {
 		return caller
 	}
 	file, line := caller[:idx], caller[idx+1:]
-	for _, anchor := range []string{"app/", "framework/", "routes/", "config/", "bootstrap/"} {
+	for _, anchor := range []string{"/app/", "/framework/", "/routes/", "/config/", "/bootstrap/", "/http/", "/facades/", "/log/"} {
 		if i := strings.Index(file, anchor); i >= 0 {
-			return file[i:] + ":" + line
+			return file[i+1:] + ":" + line // 跳过前导 /
 		}
 	}
 	if i := strings.LastIndex(file, "/"); i >= 0 {
@@ -427,21 +428,18 @@ func formatFieldValue(f zapcore.Field) string {
 		zapcore.UintptrType:
 		return fmt.Sprintf("%d", f.Integer)
 	case zapcore.Float64Type, zapcore.Float32Type:
-		enc := zapcore.NewMapObjectEncoder()
-		f.AddTo(enc)
-		if v, ok := enc.Fields[f.Key]; ok {
-			return fmt.Sprintf("%v", v)
-		}
-		return "0"
+		return fmt.Sprintf("%v", fieldToAny(f))
 	case zapcore.DurationType:
 		return time.Duration(f.Integer).String()
 	case zapcore.TimeType:
+		return time.Unix(0, f.Integer).UTC().Format("2006-01-02 15:04:05")
+	case zapcore.ByteStringType:
 		if f.Interface != nil {
-			if t, ok := f.Interface.(time.Time); ok {
-				return t.Format("2006-01-02 15:04:05")
+			if b, ok := f.Interface.([]byte); ok {
+				return quoteIfNeeded(string(b))
 			}
 		}
-		return fmt.Sprintf("%d", f.Integer)
+		return quoteIfNeeded(f.String)
 	case zapcore.ErrorType:
 		if f.Interface != nil {
 			if err, ok := f.Interface.(error); ok {
@@ -449,12 +447,28 @@ func formatFieldValue(f zapcore.Field) string {
 			}
 		}
 		return "<nil>"
-	default:
+	case zapcore.StringerType:
 		if f.Interface != nil {
-			return quoteIfNeeded(fmt.Sprint(f.Interface))
+			if s, ok := f.Interface.(fmt.Stringer); ok {
+				return quoteIfNeeded(s.String())
+			}
 		}
-		return quoteIfNeeded(f.String)
+		return quoteIfNeeded(fmt.Sprint(f.Interface))
+	case zapcore.SkipType:
+		return ""
+	default:
+		return fmt.Sprintf("%v", fieldToAny(f))
 	}
+}
+
+// fieldToAny 将 Field 转换为底层值（用于 fmt 格式化）。
+func fieldToAny(f zapcore.Field) any {
+	enc := zapcore.NewMapObjectEncoder()
+	f.AddTo(enc)
+	if v, ok := enc.Fields[f.Key]; ok {
+		return v
+	}
+	return ""
 }
 
 func quoteIfNeeded(s string) string {
@@ -503,28 +517,30 @@ func (l *logger) Warnf(f string, a ...any)          { l.writef(zapcore.WarnLevel
 func (l *logger) Error(args ...any)                 { l.write(zapcore.ErrorLevel, args...) }
 func (l *logger) Errorf(f string, a ...any)         { l.writef(zapcore.ErrorLevel, f, a...) }
 
-// Fatal 写日志后调用 os.Exit(1)，兼容 logrus 语义。
+// Fatal 写日志后刷新缓存并调用 os.Exit(1)。
 func (l *logger) Fatal(args ...any) {
 	l.write(zapcore.FatalLevel, args...)
+	_ = l.base.Sync()
 	os.Exit(1)
 }
 
-// Fatalf 写日志后调用 os.Exit(1)，兼容 logrus 语义。
+// Fatalf 写日志后刷新缓存并调用 os.Exit(1)。
 func (l *logger) Fatalf(f string, a ...any) {
 	l.writef(zapcore.FatalLevel, f, a...)
+	_ = l.base.Sync()
 	os.Exit(1)
 }
 
-// Panic 写日志后 panic，兼容 logrus 语义。
+// Panic 写日志后 panic，使用 zap 原生 Panic 能力。
 func (l *logger) Panic(args ...any) {
-	l.write(zapcore.PanicLevel, args...)
-	panic(fmt.Sprint(args...))
+	fields := callerFields()
+	l.sugar.With(fieldsToAny(fields)...).Panic(args...)
 }
 
-// Panicf 写日志后 panic，兼容 logrus 语义。
+// Panicf 写日志后 panic，使用 zap 原生 Panicf 能力。
 func (l *logger) Panicf(f string, a ...any) {
-	l.writef(zapcore.PanicLevel, f, a...)
-	panic(fmt.Sprintf(f, a...))
+	fields := callerFields()
+	l.sugar.With(fieldsToAny(fields)...).Panicf(f, a...)
 }
 
 func (l *logger) WithField(key string, value any) contracts.Log {
@@ -596,26 +612,26 @@ func (e *logEntry) Warnf(f string, a ...any)          { e.withCallerf(zapcore.Wa
 func (e *logEntry) Error(args ...any)                 { e.withCaller(zapcore.ErrorLevel, args...) }
 func (e *logEntry) Errorf(f string, a ...any)         { e.withCallerf(zapcore.ErrorLevel, f, a...) }
 
-// Fatal 写日志后 os.Exit(1)，兼容 logrus 语义（logEntry 与 logger 行为一致）。
+// Fatal 写日志后试图刷新缓存并 os.Exit(1)（logEntry 不持有 writer，仅调用 sugar.Fatal）。
 func (e *logEntry) Fatal(args ...any) {
-	e.withCaller(zapcore.FatalLevel, args...)
-	os.Exit(1)
+	fields := callerFields()
+	e.sugar.With(fieldsToAny(fields)...).Fatal(args...)
 }
 
 func (e *logEntry) Fatalf(f string, a ...any) {
-	e.withCallerf(zapcore.FatalLevel, f, a...)
-	os.Exit(1)
+	fields := callerFields()
+	e.sugar.With(fieldsToAny(fields)...).Fatalf(f, a...)
 }
 
-// Panic 写日志后 panic，兼容 logrus 语义。
+// Panic 写日志后 panic，使用 zap 原生 Panic 能力。
 func (e *logEntry) Panic(args ...any) {
-	e.withCaller(zapcore.PanicLevel, args...)
-	panic(fmt.Sprint(args...))
+	fields := callerFields()
+	e.sugar.With(fieldsToAny(fields)...).Panic(args...)
 }
 
 func (e *logEntry) Panicf(f string, a ...any) {
-	e.withCallerf(zapcore.PanicLevel, f, a...)
-	panic(fmt.Sprintf(f, a...))
+	fields := callerFields()
+	e.sugar.With(fieldsToAny(fields)...).Panicf(f, a...)
 }
 
 func (e *logEntry) WithField(key string, value any) contracts.Log {

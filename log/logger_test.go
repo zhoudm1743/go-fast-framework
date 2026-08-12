@@ -787,6 +787,218 @@ func TestLogger_CloseIdempotent(t *testing.T) {
 }
 
 // =============================================================================
+// ── v0.6.3 修复验证测试 ──────────────────────────────────────────────
+// =============================================================================
+
+// TestJSON_NoDuplicateCaller 验证 JSON 输出中不存在 duplicate caller 字段。
+func TestJSON_NoDuplicateCaller(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	cfg := newFakeConfig().
+		set("log.mode", "file").
+		set("log.level", "debug").
+		set("log.output_path", logPath).
+		set("log.file_format", "json")
+
+	log, err := NewLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewLogger 失败: %v", err)
+	}
+
+	log.Info("no dup caller")
+	if err := log.(*logger).Close(); err != nil {
+		t.Errorf("Close() 错误: %v", err)
+	}
+
+	data, _ := os.ReadFile(logPath)
+	rawJSON := strings.TrimSpace(string(data))
+
+	// 统计 "caller" 键出现次数（排除 caller_file/caller_line）
+	callerKeyCount := 0
+	idx := 0
+	for {
+		i := strings.Index(rawJSON[idx:], `"caller"`)
+		if i < 0 {
+			break
+		}
+		idx += i + len(`"caller"`)
+		// 检查后面不是 _file 或 _line
+		rest := rawJSON[idx:]
+		if !strings.HasPrefix(rest, `_file`) && !strings.HasPrefix(rest, `_line`) {
+			callerKeyCount++
+		}
+	}
+
+	if callerKeyCount != 1 {
+		t.Errorf(`期望 1 个 "caller" 键，实际 %d 个，存在重复`, callerKeyCount)
+	}
+}
+
+// TestFieldMergeCore_NoAlias 验证多次 With() 不共享底层数组。
+func TestFieldMergeCore_NoAlias(t *testing.T) {
+	base := zapcore.NewNopCore()
+	core := &fieldMergeCore{Core: base}
+
+	c1 := core.With([]zapcore.Field{zap.String("a", "1")})
+	c2 := core.With([]zapcore.Field{zap.String("b", "2")})
+
+	fc1 := c1.(*fieldMergeCore)
+	fc2 := c2.(*fieldMergeCore)
+
+	if len(fc1.prefixFields) != 1 || fc1.prefixFields[0].Key != "a" {
+		t.Errorf("core.With(a,1) 应只含 a=1，得到 %d 个字段", len(fc1.prefixFields))
+	}
+	if len(fc2.prefixFields) != 1 || fc2.prefixFields[0].Key != "b" {
+		t.Errorf("core.With(b,2) 应只含 b=2，得到 %d 个字段", len(fc2.prefixFields))
+	}
+
+	// 链式调用：core.With(a).With(b)
+	c3 := c1.With([]zapcore.Field{zap.String("c", "3")})
+	fc3 := c3.(*fieldMergeCore)
+	if len(fc3.prefixFields) != 2 {
+		t.Fatalf("链式 With 应累积 2 个字段，得到 %d", len(fc3.prefixFields))
+	}
+	if fc3.prefixFields[0].Key != "a" || fc3.prefixFields[1].Key != "c" {
+		t.Errorf("链式字段顺序错误: %v", fc3.prefixFields)
+	}
+}
+
+// TestFormatFieldValue_AllTypes 验证 formatFieldValue 覆盖所有常用类型。
+func TestFormatFieldValue_AllTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		field zapcore.Field
+		want  string
+	}{
+		{"string", zap.String("k", "hello"), "hello"},
+		{"str_with_space", zap.String("k", "hello world"), `"hello world"`},
+		{"bool_true", zap.Bool("k", true), "true"},
+		{"bool_false", zap.Bool("k", false), "false"},
+		{"int", zap.Int("k", 42), "42"},
+		{"int64", zap.Int64("k", 999), "999"},
+		{"float64", zap.Float64("k", 3.14), "3.14"},
+		{"duration", zap.Duration("k", time.Second), "1s"},
+		{"time", zap.Time("k", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)), "2026-01-01 00:00:00"},
+		{"error", zap.Error(errors.New("boom")), "boom"},
+		{"bytes", zap.ByteString("k", []byte("abc")), "abc"},
+		{"stringer", zap.Stringer("k", &fakeStringer{"xyz"}), "xyz"},
+		{"skip", zap.Skip(), ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatFieldValue(tt.field)
+			if got != tt.want {
+				t.Errorf("formatFieldValue(%s) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+type fakeStringer struct{ s string }
+
+func (f *fakeStringer) String() string { return f.s }
+
+// TestDisplayCaller_Anchors 验证 displayCaller 对新增 anchor 的缩短。
+func TestDisplayCaller_Anchors(t *testing.T) {
+	tests := []struct {
+		name   string
+		caller string
+		want   string
+	}{
+		{
+			"http 包",
+			"/home/user/go-fast-framework/http/gin/route.go:436",
+			"http/gin/route.go:436",
+		},
+		{
+			"log 包",
+			"/home/user/go-fast-framework/log/logger.go:100",
+			"log/logger.go:100",
+		},
+		{
+			"facades 包",
+			"/home/user/go-fast-framework/facades/cache.go:20",
+			"facades/cache.go:20",
+		},
+		{
+			"app 包（原有）",
+			"/home/user/go-fast-framework/app/providers/log.go:50",
+			"app/providers/log.go:50",
+		},
+		{
+			"未知路径回退",
+			"/home/user/go-fast-framework/foo/bar.go:10",
+			"bar.go:10",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := displayCaller(tt.caller)
+			if got != tt.want {
+				t.Errorf("displayCaller = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestShorten_EmptyFile 验证空文件名返回 unknown。
+func TestShorten_EmptyFile(t *testing.T) {
+	if s := shorten("", true); s != "unknown" {
+		t.Errorf("空文件名应返回 unknown，得到 %q", s)
+	}
+	if s := shorten("", false); s != "unknown" {
+		t.Errorf("ok=false 应返回 unknown，得到 %q", s)
+	}
+}
+
+// TestPanic_UsesZapNative 验证 Panic 使用 zap 原生 panic（msg 来自日志内容）。
+func TestPanic_UsesZapNative(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "test.log")
+
+	cfg := newFakeConfig().
+		set("log.mode", "file").
+		set("log.level", "debug").
+		set("log.output_path", logPath).
+		set("log.file_format", "json")
+
+	log, err := NewLogger(cfg)
+	if err != nil {
+		t.Fatalf("NewLogger 失败: %v", err)
+	}
+
+	var panicked bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				if s, ok := r.(string); ok {
+					t.Logf("panic 消息: %q", s)
+				}
+			}
+		}()
+		log.Panic("should panic with this message")
+	}()
+
+	if !panicked {
+		t.Fatal("Panic 应触发 panic")
+	}
+
+	if err := log.(*logger).Close(); err != nil {
+		t.Errorf("Close() 错误: %v", err)
+	}
+
+	// 验证日志确实被写入（panic 前已记录）
+	data, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(data), "should panic with this message") {
+		t.Error("panic 前应写入日志")
+	}
+}
+
+// =============================================================================
 // 辅助函数
 // =============================================================================
 
