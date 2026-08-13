@@ -71,6 +71,26 @@ func TestStructUtilPtrToMapNested(t *testing.T) {
 	}
 }
 
+func TestStructUtilPtrToMapZeroValuePointer(t *testing.T) {
+	req := &updateReq{
+		Age:    ptrOf(0),
+		Active: ptrOf(false),
+		Code:   ptrOf(""),
+	}
+
+	m := StructUtil.PtrToMap(req)
+
+	if v, ok := m["age"]; !ok || v != 0 {
+		t.Fatalf("*int 指向 0 应保留在 map 中，实际 %v", m)
+	}
+	if v, ok := m["active"]; !ok || v != false {
+		t.Fatalf("*bool 指向 false 应保留在 map 中，实际 %v", m)
+	}
+	if v, ok := m["code"]; !ok || v != "" {
+		t.Fatalf("*string 指向空串应保留在 map 中，实际 %v", m)
+	}
+}
+
 func TestStructUtilPtrToMapNonStruct(t *testing.T) {
 	m := StructUtil.PtrToMap(123)
 	if len(m) != 0 {
