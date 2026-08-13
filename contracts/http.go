@@ -315,12 +315,34 @@ type SessionManager interface {
 	Lifetime() time.Duration
 }
 
+// ValidationRule 自定义验证规则契约。
+// 实现该接口后通过 Validation.RegisterRule 注册，即可在 binding tag 中使用规则名。
+//
+// 例：
+//
+//	type PhoneRule struct{}
+//
+//	func (r *PhoneRule) Rule() string { return "phone" }
+//	func (r *PhoneRule) Validate(fieldValue any, param string) bool {
+//		s, ok := fieldValue.(string)
+//		return ok && regexp.MustCompile(`^1\d{10}$`).MatchString(s)
+//	}
+//	func (r *PhoneRule) Message() string { return ":attribute 格式不正确" }
+type ValidationRule interface {
+	// Rule 返回规则在 binding tag 中使用的名称。
+	Rule() string
+	// Validate 验证字段值；fieldValue 为当前字段值，param 为规则参数（如 binding:"gte=1" 中的 "1"）。
+	Validate(fieldValue any, param string) bool
+	// Message 返回验证失败时的错误消息，支持 :attribute 占位符（会被替换为字段名）。
+	Message() string
+}
+
 // Validation 验证服务契约。
 type Validation interface {
 	// Validate 验证结构体，返回验证错误。
 	Validate(obj any) error
 	// RegisterRule 注册自定义验证规则。
-	RegisterRule(rule any) error
+	RegisterRule(rule ValidationRule) error
 }
 
 // ViewEngine 是 HTML 模板渲染引擎契约。

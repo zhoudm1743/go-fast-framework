@@ -44,11 +44,10 @@ func (c *MakeValidatorCommand) Handle(ctx contracts.ConsoleContext) error {
 	ruleName := strings.ToLower(toSnakeCase(baseName))
 
 	wd, _ := os.Getwd()
-	module := readGoMod()
 	fileName := toSnakeCase(baseName) + "_rule.go"
 	filePath := filepath.Join(wd, "app", "rules", fileName)
 
-	content := buildValidatorContent(module, structName, ruleName)
+	content := buildValidatorContent(structName, ruleName)
 
 	if err := writeGeneratedFile(filePath, content); err != nil {
 		ctx.Error(err.Error())
@@ -62,15 +61,11 @@ func (c *MakeValidatorCommand) Handle(ctx contracts.ConsoleContext) error {
 	return nil
 }
 
-func buildValidatorContent(module, structName, ruleName string) string {
+func buildValidatorContent(structName, ruleName string) string {
 	return strings.Join([]string{
 		"package rules",
 		"",
-		"import (",
-		`	"github.com/go-playground/validator/v10"`,
-		")",
-		"",
-		fmt.Sprintf("// %s 自定义验证规则。", structName),
+		fmt.Sprintf("// %s 自定义验证规则，实现 contracts.ValidationRule 接口。", structName),
 		fmt.Sprintf("// 在 binding tag 中使用：binding:\"%s\"", ruleName),
 		"//",
 		"// 注册方式（在某个 ServiceProvider.Boot 中）：",
@@ -85,10 +80,10 @@ func buildValidatorContent(module, structName, ruleName string) string {
 		"}",
 		"",
 		"// Validate 验证逻辑。",
-		"// fl.Field() 可获取当前字段值；fl.Param() 可获取规则参数。",
-		fmt.Sprintf("func (r *%s) Validate(fl validator.FieldLevel) bool {", structName),
+		"// fieldValue 为当前字段值；param 为规则参数（如 binding:\"xxx=1\" 中的 \"1\"）。",
+		fmt.Sprintf("func (r *%s) Validate(fieldValue any, param string) bool {", structName),
 		"\t// TODO: 实现验证逻辑",
-		"\t// value := fl.Field().String()",
+		"\t// s, ok := fieldValue.(string)",
 		"\treturn true",
 		"}",
 		"",
@@ -97,20 +92,6 @@ func buildValidatorContent(module, structName, ruleName string) string {
 		fmt.Sprintf("func (r *%s) Message() string {", structName),
 		fmt.Sprintf("\treturn \"The :attribute is not a valid %s.\"", ruleName),
 		"}",
-		"",
-		fmt.Sprintf("// 确保 %s 实现了 validator.Func 兼容接口（编译期检查）。", structName),
-		"// go-playground/validator 通过 RegisterValidation 注册，",
-		"// 以下仅作为结构组织参考，实际注册由框架的 RegisterRule 方法处理。",
-		fmt.Sprintf("var _ = (*%s)(nil)", structName),
-		"",
-		"// RegistrationFunc 将本规则注册到 go-playground/validator 的适配函数。",
-		"// 框架的 validatorImpl.RegisterRule 会检测此方法并调用。",
-		fmt.Sprintf("func (r *%s) RegistrationFunc() validator.Func {", structName),
-		"\treturn r.Validate",
-		"}",
-		"",
-		"// 确保编译期导入 module（防止 IDE 误报）",
-		fmt.Sprintf("var _ = \"%s\"", module),
 		"",
 	}, "\n")
 }
