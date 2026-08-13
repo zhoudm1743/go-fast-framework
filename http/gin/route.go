@@ -307,8 +307,24 @@ func (r *route) StaticSPA(prefix string, fsys fs.FS, root string) contracts.Rout
 // wrap 将 contracts.HandlerFunc 转为 Gin handler。
 func (r *route) wrap(h contracts.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := h(NewContext(c, r.validator, r.storage, r.viewEngine)); err != nil {
+		err := h(NewContext(c, r.validator, r.storage, r.viewEngine))
+		if err != nil {
 			_ = c.Error(err)
+		}
+
+		// 已写入响应 → 中断链，避免后续中间件/Controller 继续写入导致响应体被拼接
+		if c.Writer.Written() {
+			c.Abort()
+			return
+		}
+
+		// 返回 error 但未写入响应 → 中断链并补一个 500
+		if err != nil {
+			c.Abort()
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"code":    1,
+				"message": "服务器内部错误",
+			})
 		}
 	}
 }
