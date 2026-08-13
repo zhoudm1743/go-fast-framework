@@ -84,7 +84,10 @@ func (ctx *Context) Bind(obj any) error {
 		}
 	}
 
-	// 4. 验证
+	// 4. 应用 default 标签默认值
+	base.ApplyDefaults(obj)
+
+	// 5. 验证
 	if ctx.validator != nil {
 		return ctx.validator.Validate(obj)
 	}

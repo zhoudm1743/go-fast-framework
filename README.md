@@ -89,6 +89,37 @@ func main() {
 
 ---
 
+## HTTP 参数绑定与默认值
+
+控制器通过 `ctx.Bind(&req)` 自动解析请求参数并校验，支持三类标签：
+
+| 标签 | 来源 | 示例 |
+|------|------|------|
+| `uri` | URL 路径参数 | `uri:"id"` |
+| `query` | 查询字符串 | `query:"page"` |
+| `json` | 请求体 | `json:"name"` |
+| `binding` | 校验规则 | `binding:"required,min=1"` |
+
+字段可附加 `default` 标签声明默认值，`Bind` 会在零值（未传入）时自动填充，无需在控制器里手写 `if` 判断：
+
+```go
+type ListReq struct {
+    Page  int    `query:"page" default:"1"`
+    Size  int    `query:"size" default:"20"`
+    Sort  string `query:"sort" default:"desc"`
+    IDs   []int  `query:"ids" default:"1,2,3"`
+}
+
+var req ListReq
+if err := ctx.Bind(&req); err != nil {
+    return ctx.Response().Validation(err)
+}
+```
+
+`default` 支持的类型：基础类型（`string` / `int` / `uint` / `float` / `bool`，含底层为基础类型的自定义类型）、指针、切片（逗号分隔）、`time.Duration`（如 `5s`）、`time.Time`（如 `2006-01-02`）、以及实现 `encoding.TextUnmarshaler` 的自定义类型。请求中已传入的值不会被默认值覆盖。
+
+---
+
 ## License
 
 [Apache 2.0](LICENSE)
