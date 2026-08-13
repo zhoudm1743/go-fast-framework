@@ -342,24 +342,51 @@ type SessionManager interface {
 	Lifetime() time.Duration
 }
 
+// ValidationField 字段校验上下文。
+// 规则通过它获取当前字段值、规则参数，并访问字段所在的结构体（支持跨字段比较）。
+type ValidationField interface {
+	// Value 返回当前字段值。
+	Value() any
+	// Param 返回规则参数（如 binding:"gte=1" 中的 "1"）。
+	Param() string
+	// Parent 返回当前字段所在的结构体。
+	Parent() any
+	// Top 返回被验证的顶层结构体。
+	Top() any
+	// Field 按字段名从父结构体取值（支持 Go 字段名及 json/form/query 标签名），
+	// 第二个返回值表示字段是否存在。
+	Field(name string) (any, bool)
+}
+
 // ValidationRule 自定义验证规则契约。
 // 实现该接口后通过 Validation.RegisterRule 注册，即可在 binding tag 中使用规则名。
 //
-// 例：
+// 简单规则示例：
 //
 //	type PhoneRule struct{}
 //
 //	func (r *PhoneRule) Rule() string { return "phone" }
-//	func (r *PhoneRule) Validate(fieldValue any, param string) bool {
-//		s, ok := fieldValue.(string)
+//	func (r *PhoneRule) Validate(field contracts.ValidationField) bool {
+//		s, ok := field.Value().(string)
 //		return ok && regexp.MustCompile(`^1\d{10}$`).MatchString(s)
 //	}
 //	func (r *PhoneRule) Message() string { return ":attribute 格式不正确" }
+//
+// 跨字段比较规则示例（确认密码）：
+//
+//	type ConfirmRule struct{}
+//
+//	func (r *ConfirmRule) Rule() string { return "confirm" }
+//	func (r *ConfirmRule) Validate(field contracts.ValidationField) bool {
+//		other, ok := field.Field("password")
+//		return ok && field.Value() == other
+//	}
+//	func (r *ConfirmRule) Message() string { return ":attribute 与密码不一致" }
 type ValidationRule interface {
 	// Rule 返回规则在 binding tag 中使用的名称。
 	Rule() string
-	// Validate 验证字段值；fieldValue 为当前字段值，param 为规则参数（如 binding:"gte=1" 中的 "1"）。
-	Validate(fieldValue any, param string) bool
+	// Validate 验证字段；field 提供字段值、参数及结构体访问能力。
+	Validate(field ValidationField) bool
 	// Message 返回验证失败时的错误消息，支持 :attribute 占位符（会被替换为字段名）。
 	Message() string
 }
