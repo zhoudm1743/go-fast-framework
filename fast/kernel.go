@@ -50,15 +50,15 @@ func (k *fastKernel) Run(args []string) error {
 		args = []string{"list"}
 	}
 
-	// --sync 标志 → 同步执行；默认异步执行
-	sync, filtered := stripFlag(args, "--sync")
-	if sync {
-		return k.dispatch(filtered)
+	// --async 标志 → 异步执行；默认同步阻塞执行
+	async, filtered := stripFlag(args, "--async")
+	if async {
+		go k.dispatch(filtered)
+		return nil
 	}
-	// 过滤 --async（兼容显式异步标志）
-	filtered = removeFlag(filtered, "--async")
-	go k.dispatch(filtered)
-	return nil
+	// 过滤 --sync（兼容显式同步标志）
+	filtered = removeFlag(filtered, "--sync")
+	return k.dispatch(filtered)
 }
 
 func (k *fastKernel) Call(command string) error {

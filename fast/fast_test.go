@@ -249,7 +249,27 @@ func TestParseArgsDefaults(t *testing.T) {
 	}
 }
 
-func TestRunDefaultAsync(t *testing.T) {
+func TestRunDefaultSync(t *testing.T) {
+	var executed bool
+
+	k := newKernel()
+	k.Register([]contracts.ConsoleCommand{
+		&testCommand{
+			sig: "heavy:task",
+			execFn: func(ctx contracts.ConsoleContext) error {
+				executed = true
+				return nil
+			},
+		},
+	})
+
+	err := k.Run([]string{"heavy:task"})
+	if err != nil || !executed {
+		t.Error("默认同步: Run 应同步阻塞执行")
+	}
+}
+
+func TestRunAsyncFlag(t *testing.T) {
 	var executed atomic.Value
 	executed.Store(false)
 
@@ -265,14 +285,14 @@ func TestRunDefaultAsync(t *testing.T) {
 		},
 	})
 
-	err := k.Run([]string{"heavy:task"})
+	err := k.Run([]string{"heavy:task", "--async"})
 	if err != nil || executed.Load().(bool) {
-		t.Error("默认异步: Run 应立即返回，命令不应已完成")
+		t.Error("--async 标志: Run 应立即返回，命令不应已完成")
 	}
 
 	time.Sleep(100 * time.Millisecond)
 	if !executed.Load().(bool) {
-		t.Error("默认异步: 命令应在后台完成")
+		t.Error("--async 标志: 命令应在后台完成")
 	}
 }
 

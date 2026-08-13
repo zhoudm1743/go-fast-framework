@@ -4,10 +4,10 @@ package contracts
 type Fast interface {
 	// Register 批量注册命令列表。
 	Register(commands []ConsoleCommand)
-	// Run 解析参数切片并分发执行（通常传入 os.Args[2:]）。默认异步执行。
-	// 加 --sync 标志可切换为同步阻塞执行。
+	// Run 解析参数切片并分发执行（通常传入 os.Args[2:]）。默认同步阻塞执行。
+	// 加 --async 标志可切换为异步执行。
 	Run(args []string) error
-	// Call 以编程方式执行命令。默认异步，加 --sync 可同步。
+	// Call 以编程方式执行命令。默认同步，加 --async 可异步。
 	Call(command string) error
 	// RunSync 同步执行命令，阻塞直到命令完成并返回错误。
 	RunSync(args []string) error
