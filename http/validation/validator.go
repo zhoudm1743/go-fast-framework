@@ -6,18 +6,23 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/go-playground/locales/zh"
+	ut "github.com/go-playground/universal-translator"
 	"github.com/go-playground/validator/v10"
+	zh_translations "github.com/go-playground/validator/v10/translations/zh"
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 )
 
 // validatorImpl 实现 contracts.Validation 接口。
 type validatorImpl struct {
 	validate *validator.Validate
+	// trans 中文翻译器，用于将内置规则错误消息转为中文。
+	trans ut.Translator
 	// messages 记录自定义规则名 → 错误消息模板，用于验证失败时替换默认消息。
 	messages map[string]string
 }
 
-// NewValidator 创建验证器实例。
+// NewValidator 创建验证器实例（内置规则错误消息使用中文）。
 func NewValidator() (*validatorImpl, error) {
 	v := validator.New()
 
@@ -35,7 +40,14 @@ func NewValidator() (*validatorImpl, error) {
 		return fld.Name
 	})
 
-	return &validatorImpl{validate: v, messages: make(map[string]string)}, nil
+	zhLocale := zh.New()
+	uni := ut.New(zhLocale, zhLocale)
+	trans, _ := uni.GetTranslator("zh")
+	if err := zh_translations.RegisterDefaultTranslations(v, trans); err != nil {
+		return nil, fmt.Errorf("注册中文翻译失败: %w", err)
+	}
+
+	return &validatorImpl{validate: v, trans: trans, messages: make(map[string]string)}, nil
 }
 
 func (v *validatorImpl) Validate(obj any) error {
@@ -169,7 +181,7 @@ func (v *validatorImpl) formatError(err error) error {
 			msgs = append(msgs, strings.ReplaceAll(msg, ":attribute", fe.Field()))
 			continue
 		}
-		msgs = append(msgs, fe.Error())
+		msgs = append(msgs, fe.Translate(v.trans))
 	}
 	return errors.New(strings.Join(msgs, "; "))
 }

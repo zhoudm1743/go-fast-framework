@@ -91,6 +91,21 @@ func TestRegisterNilRule(t *testing.T) {
 	}
 }
 
+type basicReq struct {
+	Name string `json:"name" binding:"required,min=2"`
+}
+
+func TestBuiltinRuleChineseMessage(t *testing.T) {
+	v, _ := NewValidator()
+	err := v.Validate(&basicReq{Name: ""})
+	if err == nil {
+		t.Fatal("期望验证失败")
+	}
+	if !strings.Contains(err.Error(), "必填") {
+		t.Fatalf("期望中文必填消息，实际 %q", err.Error())
+	}
+}
+
 type emptyNameRule struct{}
 
 func (r *emptyNameRule) Rule() string                                  { return "" }
