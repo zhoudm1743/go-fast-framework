@@ -61,12 +61,28 @@ type Context interface {
 	Param(key string) string
 	// Query 返回查询字符串参数，支持默认值。
 	Query(key string, defaultValue ...string) string
+	// QueryInt 返回 int 类型的查询参数，解析失败返回默认值（默认 0）。
+	QueryInt(key string, defaultValue ...int) int
+	// QueryInt64 返回 int64 类型的查询参数，解析失败返回默认值（默认 0）。
+	QueryInt64(key string, defaultValue ...int64) int64
+	// QueryFloat64 返回 float64 类型的查询参数，解析失败返回默认值（默认 0）。
+	QueryFloat64(key string, defaultValue ...float64) float64
+	// QueryBool 返回 bool 类型的查询参数，解析失败返回默认值（默认 false）。
+	QueryBool(key string, defaultValue ...bool) bool
 	// Header 返回请求头的值。
 	Header(key string) string
 	// IP 返回客户端 IP 地址。
 	IP() string
 	// BodyRaw 返回原始请求体字节。
 	BodyRaw() []byte
+	// FormValue 返回表单字段值（application/x-www-form-urlencoded 或 multipart）。
+	FormValue(key string) string
+	// ContentType 返回请求的 Content-Type。
+	ContentType() string
+	// UserAgent 返回客户端 User-Agent。
+	UserAgent() string
+	// FullPath 返回当前请求匹配的路由模板，如 /users/:id。
+	FullPath() string
 
 	// Bind 将请求体（JSON / Form）反序列化到 obj，并自动执行验证（binding tag）。
 	// 验证失败时返回包含字段错误信息的 error。
@@ -91,6 +107,8 @@ type Context interface {
 	JSON(code int, obj any) error
 	// String 发送纯文本响应。
 	String(code int, s string) error
+	// Redirect 发送 HTTP 重定向响应。
+	Redirect(code int, location string) error
 	// HTML 渲染 HTML 模板并发送响应；需先通过 view.ServiceProvider 注册模板引擎。
 	// name 为相对于模板目录的路径，例如 "home/index.html"。
 	HTML(code int, name string, data any) error
@@ -170,6 +188,12 @@ type Route interface {
 	Patch(path string, handler HandlerFunc) Route
 	Head(path string, handler HandlerFunc) Route
 	Options(path string, handler HandlerFunc) Route
+	// Any 匹配所有 HTTP 方法。
+	Any(path string, handler HandlerFunc) Route
+	// Match 匹配指定的一组 HTTP 方法。
+	Match(methods []string, path string, handler HandlerFunc) Route
+	// Add 注册任意 HTTP 方法（如 WebSocket、自定义动词）。
+	Add(method string, path string, handler HandlerFunc) Route
 
 	// Group 创建路由组（共享前缀和中间件）。
 	// args 支持两种类型，可任意组合：
@@ -228,6 +252,9 @@ type Route interface {
 	Routes() []RouteInfo
 	// Route 获取指定路径的路由。
 	Route(path string) RouteInfo
+	// Underlying 返回底层框架实例（gin 驱动为 *gin.Engine，fiber 驱动为 *fiber.App），
+	// 用于需要访问框架原生能力的场景。
+	Underlying() any
 }
 
 // CookieOptions 设置 Cookie 的选项。

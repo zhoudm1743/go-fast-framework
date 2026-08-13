@@ -45,6 +45,22 @@ func (ctx *Context) Query(key string, defaultValue ...string) string {
 	return val
 }
 
+func (ctx *Context) QueryInt(key string, defaultValue ...int) int {
+	return base.QueryInt(ctx.c.Query(key), defaultValue...)
+}
+
+func (ctx *Context) QueryInt64(key string, defaultValue ...int64) int64 {
+	return base.QueryInt64(ctx.c.Query(key), defaultValue...)
+}
+
+func (ctx *Context) QueryFloat64(key string, defaultValue ...float64) float64 {
+	return base.QueryFloat64(ctx.c.Query(key), defaultValue...)
+}
+
+func (ctx *Context) QueryBool(key string, defaultValue ...bool) bool {
+	return base.QueryBool(ctx.c.Query(key), defaultValue...)
+}
+
 func (ctx *Context) Header(key string) string { return ctx.c.GetHeader(key) }
 func (ctx *Context) IP() string               { return ctx.c.ClientIP() }
 func (ctx *Context) BodyRaw() []byte {
@@ -61,6 +77,11 @@ func (ctx *Context) BodyRaw() []byte {
 	}
 	return body
 }
+
+func (ctx *Context) FormValue(key string) string { return ctx.c.PostForm(key) }
+func (ctx *Context) ContentType() string         { return ctx.c.ContentType() }
+func (ctx *Context) UserAgent() string           { return ctx.c.Request.UserAgent() }
+func (ctx *Context) FullPath() string            { return ctx.c.FullPath() }
 
 // Bind 将请求数据填充到 obj（URI → Query → Body），最后统一验证。
 //
@@ -135,6 +156,12 @@ func (ctx *Context) JSON(code int, obj any) error {
 
 func (ctx *Context) String(code int, s string) error {
 	ctx.c.String(code, "%s", s)
+	return nil
+}
+
+// Redirect 发送 HTTP 重定向响应。
+func (ctx *Context) Redirect(code int, location string) error {
+	ctx.c.Redirect(code, location)
 	return nil
 }
 

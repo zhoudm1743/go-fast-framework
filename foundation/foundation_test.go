@@ -600,15 +600,17 @@ func TestDeferredProvider_ConfigDefaults(t *testing.T) {
 
 type fakeConfig struct{ values map[string]any }
 
-func (f *fakeConfig) Env(key string, defaultValue ...any) any               { return nil }
-func (f *fakeConfig) Get(key string, defaultValue ...any) any                { return nil }
-func (f *fakeConfig) GetString(key string, defaultValue ...string) string    { return "" }
-func (f *fakeConfig) GetInt(key string, defaultValue ...int) int             { return 0 }
-func (f *fakeConfig) GetBool(key string, defaultValue ...bool) bool          { return false }
-func (f *fakeConfig) GetFloat64(key string, defaultValue ...float64) float64 { return 0 }
+func (f *fakeConfig) Env(key string, defaultValue ...any) any                      { return nil }
+func (f *fakeConfig) Get(key string, defaultValue ...any) any                      { return nil }
+func (f *fakeConfig) GetString(key string, defaultValue ...string) string          { return "" }
+func (f *fakeConfig) GetInt(key string, defaultValue ...int) int                   { return 0 }
+func (f *fakeConfig) GetBool(key string, defaultValue ...bool) bool                { return false }
+func (f *fakeConfig) GetFloat64(key string, defaultValue ...float64) float64       { return 0 }
 func (f *fakeConfig) GetStringSlice(key string, defaultValue ...[]string) []string { return nil }
-func (f *fakeConfig) GetStringMap(key string, defaultValue ...map[string]any) map[string]any { return nil }
-func (f *fakeConfig) Set(key string, value any)                              {}
+func (f *fakeConfig) GetStringMap(key string, defaultValue ...map[string]any) map[string]any {
+	return nil
+}
+func (f *fakeConfig) Set(key string, value any) {}
 func (f *fakeConfig) SetDefaults(defaults map[string]any) {
 	for k, v := range defaults {
 		f.values[k] = v
@@ -674,14 +676,14 @@ func TestApplication_Validator(t *testing.T) {
 type dummyFast struct{}
 
 func (d *dummyFast) Register(commands []contracts.ConsoleCommand) {}
-func (d *dummyFast) Run(args []string) error                       { return nil }
-func (d *dummyFast) Call(command string) error                     { return nil }
-func (d *dummyFast) RunSync(args []string) error                   { return nil }
-func (d *dummyFast) CallSync(command string) error                 { return nil }
-func (d *dummyFast) RunAsync(args []string)                        {}
-func (d *dummyFast) CallAsync(command string)                      {}
+func (d *dummyFast) Run(args []string) error                      { return nil }
+func (d *dummyFast) Call(command string) error                    { return nil }
+func (d *dummyFast) RunSync(args []string) error                  { return nil }
+func (d *dummyFast) CallSync(command string) error                { return nil }
+func (d *dummyFast) RunAsync(args []string)                       {}
+func (d *dummyFast) CallAsync(command string)                     {}
 
 type dummyValidation struct{}
 
-func (d *dummyValidation) Validate(obj any) error          { return nil }
-func (d *dummyValidation) RegisterRule(rule any) error     { return nil }
+func (d *dummyValidation) Validate(obj any) error                           { return nil }
+func (d *dummyValidation) RegisterRule(rule contracts.ValidationRule) error { return nil }

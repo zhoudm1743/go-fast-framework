@@ -133,6 +133,20 @@ func (r *route) Options(path string, h contracts.HandlerFunc) contracts.Route {
 	r.router.Options(path, r.wrap(h))
 	return r
 }
+func (r *route) Any(path string, h contracts.HandlerFunc) contracts.Route {
+	r.router.All(path, r.wrap(h))
+	return r
+}
+func (r *route) Match(methods []string, path string, h contracts.HandlerFunc) contracts.Route {
+	for _, m := range methods {
+		r.router.Add(m, path, r.wrap(h))
+	}
+	return r
+}
+func (r *route) Add(method string, path string, h contracts.HandlerFunc) contracts.Route {
+	r.router.Add(method, path, r.wrap(h))
+	return r
+}
 
 func (r *route) Group(prefix string, args ...any) contracts.Route {
 	group := &route{
@@ -298,6 +312,11 @@ func (r *route) Route(path string) contracts.RouteInfo {
 		}
 	}
 	return contracts.RouteInfo{}
+}
+
+// Underlying 返回底层 *fiber.App，用于需要访问 Fiber 原生能力的场景。
+func (r *route) Underlying() any {
+	return r.app
 }
 
 // ── 内置中间件 ──────────────────────────────────────────────────────

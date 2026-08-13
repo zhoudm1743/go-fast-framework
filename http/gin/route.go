@@ -143,6 +143,18 @@ func (r *route) Options(path string, h contracts.HandlerFunc) contracts.Route {
 	r.router.Handle(http.MethodOptions, path, r.wrap(h))
 	return r
 }
+func (r *route) Any(path string, h contracts.HandlerFunc) contracts.Route {
+	r.router.Any(path, r.wrap(h))
+	return r
+}
+func (r *route) Match(methods []string, path string, h contracts.HandlerFunc) contracts.Route {
+	r.router.Match(methods, path, r.wrap(h))
+	return r
+}
+func (r *route) Add(method string, path string, h contracts.HandlerFunc) contracts.Route {
+	r.router.Handle(method, path, r.wrap(h))
+	return r
+}
 
 func (r *route) Group(prefix string, args ...any) contracts.Route {
 	ginGroup := r.router.Group(prefix)
@@ -332,6 +344,11 @@ func (r *route) Route(path string) contracts.RouteInfo {
 		}
 	}
 	return contracts.RouteInfo{}
+}
+
+// Underlying 返回底层 *gin.Engine，用于需要访问 Gin 原生能力的场景。
+func (r *route) Underlying() any {
+	return r.engine
 }
 
 // ── 内置中间件 ──────────────────────────────────────────────────────
