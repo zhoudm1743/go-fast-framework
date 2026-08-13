@@ -34,6 +34,8 @@ func NewRoute(cfg contracts.Config, validator contracts.Validation, storage cont
 	} else {
 		gin.SetMode(gin.DebugMode)
 	}
+	// 禁用 gin 内置验证器（英文），验证统一由框架 validator 处理（支持中文）
+	gin.DisableBindValidation()
 	// 禁用 gin 默认的控制台输出，由框架 log 统一处理
 	gin.DefaultWriter = newLogWriter(log, false)
 	gin.DefaultErrorWriter = newLogWriter(log, true)
