@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/schema"
 )
 
 // GormQuery 将 contracts.Query 的每个方法代理到 *gorm.DB。
@@ -40,7 +41,26 @@ func (q *GormQuery) schemaTable(name string) string {
 // 后续的 Model()/Table() 调用将自动在表名前加上 "schema." 前缀。
 // 示例：facades.DB().Connection("pg").Schema("analytics").Model(&Event{}).Find(&events)
 func (q *GormQuery) Schema(name string) contracts.Query {
-	return &GormQuery{db: q.db, schema: name}
+	if name == "" {
+		return q
+	}
+	// 克隆 NamingStrategy 并替换 TablePrefix 为租户 schema 前缀。
+	// 这样主表、Preload 子查询、Joins 关联表统一由 NamingStrategy 生成租户 schema 前缀，
+	// 而不是沿用连接配置里固定的默认 schema（如 "public."），否则关联表会查错 schema。
+	// 必须克隆，避免修改共享的 NamingStrategy 影响其他连接上的查询。
+	// 使用 Session(&gorm.Session{})（clone=2）以保留已构建的 Statement 状态，
+	// 确保 Schema() 无论在 Model/Where 之前或之后调用都不丢失查询条件。
+	db := q.db.Session(&gorm.Session{})
+	switch ns := db.NamingStrategy.(type) {
+	case schema.NamingStrategy:
+		ns.TablePrefix = name + "."
+		db.NamingStrategy = ns
+	case *schema.NamingStrategy:
+		clone := *ns
+		clone.TablePrefix = name + "."
+		db.NamingStrategy = &clone
+	}
+	return &GormQuery{db: db, schema: name}
 }
 
 // GetSchema 返回当前查询上下文的 schema 名称（PostgreSQL 多 schema 场景）。
@@ -50,25 +70,19 @@ func (q *GormQuery) GetSchema() string {
 	return q.schema
 }
 
-// applySchema 在终结方法（First/Find/Create 等）执行前，
-// 如果设置了 schema：
-//  1. 通过 SET search_path 让 PostgreSQL 自动将裸表名解析到租户 schema，
-//     确保所有子查询（Joins、Preloads、关联等）无需单独处理就能找到正确的表。
-//  2. 如果 dest 是可解析的 GORM model，额外设置 Table(schema.tableName)
-//     作为双重保险（对主表显式指定 schema）。
+// applySchema 在终结方法（First/Find/Create 等）执行前处理租户 schema。
+// 多租户 schema 已通过 Schema() 动态设置 NamingStrategy.TablePrefix，主表与关联表
+// （Preload/Joins）由 GORM 统一生成租户 schema 前缀，此处仅保留兜底逻辑：
+// 若 NamingStrategy 未生效（如自定义 Namer），且 dest 可解析出不含 "." 的裸表名，
+// 则显式加上 schema 前缀。
+// 注意：不再使用 SET search_path，因为该语句作用于连接 session，会污染连接池
+// （被其他租户复用连接时串 schema），且 SET 与后续查询可能落在不同连接上不可靠。
 func (q *GormQuery) applySchema(dest any) *gorm.DB {
-	if q.schema != "" {
-		db := q.db.Exec("SET search_path TO " + q.schema + ", public")
-		if dest != nil {
-			stmt := &gorm.Statement{DB: db}
-			if err := stmt.Parse(dest); err == nil && stmt.Table != "" && !strings.Contains(stmt.Table, ".") {
-				return db.Table(q.schema + "." + stmt.Table)
-			}
+	if q.schema != "" && dest != nil {
+		stmt := &gorm.Statement{DB: q.db}
+		if err := stmt.Parse(dest); err == nil && stmt.Table != "" && !strings.Contains(stmt.Table, ".") {
+			return q.db.Table(q.schema + "." + stmt.Table)
 		}
-		return db
-	}
-	if dest != nil {
-		return q.db
 	}
 	return q.db
 }
@@ -91,6 +105,15 @@ func (q *GormQuery) Model(value any) contracts.Query {
 }
 
 func (q *GormQuery) Select(query any, args ...any) contracts.Query {
+	// Select("*") 等价于"选择所有字段"，即 GORM 的默认行为。
+	// 若直接透传 "*"，GORM 会设置 Selects=["*"]，从而引发两个边界问题：
+	//  1. Pluck 依据 len(Selects)==1 判定"已显式指定单列"而跳过 pluck 列，
+	//     最终 SELECT * 扫描到单列 dest 时 panic；
+	//  2. buildSelect 中 len(Selects)>0 优先，导致 Omit 失效。
+	// 这里统一清空 Selects，回归 GORM 默认语义，以上问题随之消失。
+	if s, ok := query.(string); ok && len(args) == 0 && strings.TrimSpace(s) == "*" {
+		return q.wrap(q.db.Select([]string{}))
+	}
 	return q.wrap(q.db.Select(query, args...))
 }
 
@@ -145,11 +168,17 @@ func (q *GormQuery) Preload(query string, args ...any) contracts.Query {
 		schema := q.schema
 		// Preload 生成的子查询不会继承 Tenant() 设置的 schema，
 		// 需要在回调中手动设置 Table(schema.table)。
+		// 注意：NamingStrategy 可能已给表名加上默认 schema 前缀（如 "public."），
+		// 这里需先剥离已有前缀再拼接租户 schema，否则会命中 "public.xxx" 而非租户表。
 		schemaCb := func(db *gorm.DB) *gorm.DB {
-			if db.Statement.Table != "" && !strings.Contains(db.Statement.Table, ".") {
-				return db.Table(schema + "." + db.Statement.Table)
+			table := db.Statement.Table
+			if table == "" {
+				return db
 			}
-			return db
+			if idx := strings.LastIndex(table, "."); idx >= 0 {
+				table = table[idx+1:]
+			}
+			return db.Table(schema + "." + table)
 		}
 		hasCallback := false
 		for i, a := range args {
@@ -212,7 +241,10 @@ func (q *GormQuery) CreateInBatches(value any, batchSize int) error {
 	if err := invokeBeforeCreate(q, value); err != nil {
 		return err
 	}
-	return wrapError(q.applySchema(value).CreateInBatches(value, batchSize).Error)
+	if err := wrapError(q.applySchema(value).CreateInBatches(value, batchSize).Error); err != nil {
+		return err
+	}
+	return invokeAfterCreate(q, value)
 }
 
 func (q *GormQuery) Save(value any) error {

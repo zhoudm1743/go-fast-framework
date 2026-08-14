@@ -327,3 +327,76 @@ func TestFirst_RecordNotFound(t *testing.T) {
 		t.Errorf("RecordNotFound 应映射为 ErrRecordNotFound, 实际: %v", err)
 	}
 }
+
+// ── Select("*") 回归测试 ─────────────────────────────────────────────
+
+func TestSelectStar_Find(t *testing.T) {
+	drv := newTestDriverWithTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "star001", Name: "alice"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	var rows []TestModel
+	if err := q.Model(&TestModel{}).Select("*").Find(&rows); err != nil {
+		t.Fatalf("Select(*) 后 Find 不应报错: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Name != "alice" {
+		t.Errorf("期望查到 alice 且字段完整, 实际 %+v", rows)
+	}
+}
+
+func TestSelectStar_Pluck(t *testing.T) {
+	drv := newTestDriverWithTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "star002", Name: "bob"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	var names []string
+	if err := q.Model(&TestModel{}).Select("*").Pluck("name", &names); err != nil {
+		t.Fatalf("Select(*) 后 Pluck 不应报错: %v", err)
+	}
+	if len(names) != 1 || names[0] != "bob" {
+		t.Errorf("期望 [bob], 实际 %v", names)
+	}
+}
+
+func TestSelectStar_Omit(t *testing.T) {
+	drv := newTestDriverWithTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "star003", Name: "carol"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	var rows []TestModel
+	if err := q.Model(&TestModel{}).Select("*").Omit("name").Find(&rows); err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if rows[0].ID == "" {
+		t.Error("Omit name 后 ID 仍应被查询到")
+	}
+	if rows[0].Name != "" {
+		t.Errorf("Omit name 后 Name 应为空, 实际 %q", rows[0].Name)
+	}
+}
+
+func TestSelectStar_OverridesSelect(t *testing.T) {
+	drv := newTestDriverWithTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "star004", Name: "dave"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	var rows []TestModel
+	if err := q.Model(&TestModel{}).Select("id").Select("*").Find(&rows); err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if rows[0].Name != "dave" {
+		t.Errorf("Select(id) 后再 Select(*) 应恢复全字段, Name 实际 %q", rows[0].Name)
+	}
+}
