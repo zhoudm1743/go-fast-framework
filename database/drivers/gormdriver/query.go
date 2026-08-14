@@ -172,6 +172,15 @@ func (q *GormQuery) Preload(query string, args ...any) contracts.Query {
 		// 这里需先剥离已有前缀再拼接租户 schema，否则会命中 "public.xxx" 而非租户表。
 		schemaCb := func(db *gorm.DB) *gorm.DB {
 			table := db.Statement.Table
+			if table == "" && db.Statement.Model != nil {
+				// Preload 子查询回调时机下 Statement.Table 尚未解析（仍为空），
+				// 此时 NamingStrategy 对实现 TableName() 的模型不生效，
+				// 需从 Statement.Model 重新解析出裸表名，再手动拼租户 schema 前缀。
+				stmt := &gorm.Statement{DB: db}
+				if err := stmt.Parse(db.Statement.Model); err == nil {
+					table = stmt.Table
+				}
+			}
 			if table == "" {
 				return db
 			}

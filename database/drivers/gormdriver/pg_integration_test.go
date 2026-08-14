@@ -38,6 +38,18 @@ type OrgNode struct {
 	Children []OrgNode `gorm:"foreignKey:ParentID;references:ID"`
 }
 
+// TablerOrgNode 模拟业务模型实现 TableName()（返回裸表名）的场景。
+// GORM 的 NamingStrategy 对实现 TableName() 的模型不生效，Preload 需兜底解析 schema 前缀。
+// TableName 复用真实表 org_nodes（tenant schema 下已有数据）。
+type TablerOrgNode struct {
+	ID       string          `gorm:"column:id;primaryKey"`
+	ParentID string          `gorm:"column:parent_id"`
+	Name     string          `gorm:"column:name"`
+	Children []TablerOrgNode `gorm:"foreignKey:ParentID;references:ID"`
+}
+
+func (TablerOrgNode) TableName() string { return "org_nodes" }
+
 func newPG(t *testing.T) *GormDriver {
 	t.Helper()
 	dsn := os.Getenv("GOFAST_TEST_PG_DSN")
@@ -192,6 +204,30 @@ func TestPG_PreloadTenant(t *testing.T) {
 	}
 	for _, c := range roots[0].Children {
 		t.Logf("  child: %s (%s)", c.Name, c.ID)
+	}
+}
+
+// TestPG_PreloadTenantTableName 覆盖"模型实现 TableName() 返回裸表名"的 Preload。
+// 回归：0.7.5 移除 SET search_path 后，Preload 子查询因 Statement.Table 为空而丢失 schema 前缀，
+// 导致 relation "xxx" does not exist。此测试验证 schema 前缀兜底解析。
+func TestPG_PreloadTenantTableName(t *testing.T) {
+	drv := newPG(t)
+	ten := "tenant_260563780"
+
+	var roots []TablerOrgNode
+	err := drv.Query().Schema(ten).Model(&TablerOrgNode{}).
+		Where("parent_id IS NULL").Preload("Children").Find(&roots)
+	if err != nil {
+		t.Fatalf("TableName Preload: %v", err)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("应 1 个根节点, 实际 %d", len(roots))
+	}
+	if roots[0].Name != "大房东" {
+		t.Errorf("根节点应为大房东, 实际 %q", roots[0].Name)
+	}
+	if len(roots[0].Children) == 0 {
+		t.Error("TableName 模型 Preload Children 应加载子节点（schema 穿透问题会导致为空）")
 	}
 }
 
