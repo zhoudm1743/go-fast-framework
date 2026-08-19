@@ -243,3 +243,54 @@ func TestQueryCache_LockBypassesCache(t *testing.T) {
 		t.Fatalf("悲观锁查询不应被缓存，期望 grace_v2 实际 %v", m2.Name)
 	}
 }
+
+// testModelLite 与 TestModel 同表查询时使用的不同类型，用于验证缓存 key 的类型隔离。
+type testModelLite struct {
+	ID   string
+	Name string
+}
+
+// TestQueryCache_DestTypeIsolation 验证缓存 key 包含 dest 类型：
+// 同一 SQL 被不同 dest 类型复用时，不应共享缓存（避免返回错误类型的错误数据）。
+func TestQueryCache_DestTypeIsolation(t *testing.T) {
+	drv := newTestDriverWithCaches(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "c008", Name: "type_a"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	// 第一次：TestModel 类型查询并写入缓存
+	var m1 TestModel
+	if err := q.Cache().First(&m1, "id = ?", "c008"); err != nil {
+		t.Fatalf("TestModel 首次缓存查询失败: %v", err)
+	}
+	if m1.Name != "type_a" {
+		t.Fatalf("查询结果错误: %v", m1.Name)
+	}
+
+	// 原生 SQL 直接改库（绕过缓存失效回调）
+	if err := q.Exec("UPDATE test_models SET name = 'type_b' WHERE id = ?", "c008"); err != nil {
+		t.Fatalf("直接改库失败: %v", err)
+	}
+
+	// 第二次：testModelLite 类型查询同一表、同一 SQL。
+	// 若 key 不区分类型，会命中 TestModel 的缓存返回旧值 type_a；
+	// 类型隔离生效时应回源读到新值 type_b。
+	var lite testModelLite
+	if err := q.Cache().Table("test_models").First(&lite, "id = ?", "c008"); err != nil {
+		t.Fatalf("testModelLite 缓存查询失败: %v", err)
+	}
+	if lite.Name != "type_b" {
+		t.Fatalf("类型隔离失效：testModelLite 应回源读到 type_b，实际命中缓存旧值 %v", lite.Name)
+	}
+
+	// 第三次：TestModel 类型再次查询，应命中自身缓存返回旧值 type_a
+	var m2 TestModel
+	if err := q.Cache().First(&m2, "id = ?", "c008"); err != nil {
+		t.Fatalf("TestModel 二次缓存查询失败: %v", err)
+	}
+	if m2.Name != "type_a" {
+		t.Fatalf("TestModel 应命中自身缓存，期望 type_a 实际 %v", m2.Name)
+	}
+}

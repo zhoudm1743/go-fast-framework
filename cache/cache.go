@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"time"
 
 	redisStore "github.com/zhoudm1743/go-fast-framework/cache/redis_store"
@@ -36,9 +37,12 @@ func NewCacheManager(cfg contracts.Config) (contracts.Cache, error) {
 			Prefix:   cfg.GetString("cache.redis.prefix", ""),
 		}
 		rs, err := redisStore.New(redisCfg)
-		if err == nil {
-			m.stores["redis"] = rs
+		if err != nil {
+			// 配置了 redis 却连接失败时必须显式报错（fail-fast），
+			// 避免静默降级 memory 导致多副本缓存不一致等隐蔽问题。
+			return nil, fmt.Errorf("[GoFast] 初始化 redis 缓存失败: %w", err)
 		}
+		m.stores["redis"] = rs
 	}
 
 	return m, nil

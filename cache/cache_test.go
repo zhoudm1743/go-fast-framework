@@ -1,9 +1,12 @@
 package cache
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/zhoudm1743/go-fast-framework/config"
 )
 
 func newTestStore() *memoryStore {
@@ -203,4 +206,24 @@ func TestConcurrentSafety(t *testing.T) {
 	}
 	wg.Wait()
 	// 只要不 panic / deadlock 即为通过
+}
+
+// TestNewCacheManager_RedisUnavailable 验证 redis 连接失败时 fail-fast 返回错误，
+// 而不是静默降级到 memory（多副本下内存缓存不一致的隐蔽问题根源）。
+func TestNewCacheManager_RedisUnavailable(t *testing.T) {
+	cfg, err := config.NewConfig("/nonexistent/cache-test.yaml")
+	if err != nil {
+		t.Fatalf("构造空配置失败: %v", err)
+	}
+	cfg.Set("cache.driver", "redis")
+	cfg.Set("cache.redis.host", "127.0.0.1")
+	cfg.Set("cache.redis.port", 1) // 必然被拒绝的端口，确保连接失败
+
+	_, err = NewCacheManager(cfg)
+	if err == nil {
+		t.Fatal("redis 连接失败应返回错误，而不是静默降级 memory")
+	}
+	if !strings.Contains(err.Error(), "初始化 redis 缓存失败") {
+		t.Fatalf("错误信息应指明 redis 初始化失败，实际: %v", err)
+	}
 }

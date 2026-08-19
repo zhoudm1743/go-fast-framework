@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 
 	"github.com/go-gorm/caches/v4"
@@ -71,6 +72,7 @@ func (c *gormCacher) Get(ctx context.Context, key string, q *caches.Query[any]) 
 	if !ok {
 		return nil, nil
 	}
+	key = cacheKey(key, q.Dest)
 	data := c.cache.Store(cfg.Store).Get(key)
 	if data == nil {
 		return nil, nil
@@ -97,7 +99,7 @@ func (c *gormCacher) Store(ctx context.Context, key string, val *caches.Query[an
 	}
 	c.recordStore(cfg.Store)
 	tags := append([]string{queryCacheTag}, cfg.Tags...)
-	return c.cache.Store(cfg.Store).Tags(tags...).Put(key, bytes, cfg.TTL)
+	return c.cache.Store(cfg.Store).Tags(tags...).Put(cacheKey(key, val.Dest), bytes, cfg.TTL)
 }
 
 // Invalidate 清除所有已使用的缓存存储上的查询缓存。
@@ -125,8 +127,20 @@ func (c *gormCacher) recordStore(name string) {
 	c.mu.Unlock()
 }
 
+// cacheKey 将插件生成的标识符与 dest 类型绑定，生成最终缓存 key。
+// 原因：go-gorm/caches 的 key 仅由 SQL + 参数组成，同一 SQL 若被不同 dest 类型复用，
+// 命中时会把缓存的 JSON 反序列化进当前 dest 类型（json 复用指针类型），导致返回错误数据。
+// 追加 dest 类型后，不同结构的查询天然隔离，且不影响按 tag 的失效逻辑。
+func cacheKey(key string, dest any) string {
+	if dest == nil {
+		return key
+	}
+	return key + "#t=" + reflect.TypeOf(dest).String()
+}
+
 // toBytes 将缓存值还原为字节切片。
-// 框架 memory store 原样返回 []byte；redis store 经 JSON 序列化后返回 []byte 或 string。
+// 框架 memory/redis store 对 []byte 均原样返回（redis store 经 "b:" 前缀实现字节保真，
+// 避免 json.Marshal 将 []byte 编码为 base64 导致双重编码）。
 func toBytes(v any) ([]byte, bool) {
 	switch b := v.(type) {
 	case []byte:

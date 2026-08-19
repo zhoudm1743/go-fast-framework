@@ -52,14 +52,28 @@ func (r *RedisStore) key(k string) string {
 	return r.prefix + ":" + k
 }
 
-// serialize 将值序列化为 JSON。
+// serialize 将值序列化为存储字符串。
+// []byte 原样按二进制字符串存取（RESP 二进制安全），加 "b:" 前缀；
+// 其余值 JSON 序列化并加 "j:" 前缀，读回时可精确区分字节与 JSON 值。
 func serialize(v any) (string, error) {
+	if b, ok := v.([]byte); ok {
+		return "b:" + string(b), nil
+	}
 	b, err := json.Marshal(v)
-	return string(b), err
+	return "j:" + string(b), err
 }
 
-// deserialize 将 JSON 反序列化为 any。
+// deserialize 将存储字符串还原为 any。
+// "b:" 前缀还原为 []byte（含空字节数组）；"j:" 前缀或旧数据（无前缀）按 JSON 解析。
 func deserialize(s string) any {
+	if len(s) >= 2 {
+		switch s[:2] {
+		case "b:":
+			return []byte(s[2:])
+		case "j:":
+			s = s[2:]
+		}
+	}
 	var v any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return s
