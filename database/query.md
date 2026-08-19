@@ -596,6 +596,23 @@ facades.DB().Query().
 - [x] `database/service_provider.go` — Boot 阶段按配置 `database.cache.enabled: true` 注入 cache 服务
 - [x] `database/drivers/gormdriver/cacher_test.go` — 命中/未命中、写操作失效、TTL 与标签、未启用插件无副作用
 
+### 查询缓存 · 兼容性实测结论（2026-08-19）
+
+使用 SQLite 实测 `Query().Cache()` 与各类查询的兼容性：
+
+| 场景 | 结果 | 说明 |
+|------|------|------|
+| `First/Find/Count/Pluck/Exists` | ✅ | 缓存命中返回旧值，写操作失效正常 |
+| `Preload/Joins` 关联查询 | ✅ | 关联子查询继承缓存标记，同样被缓存，行为一致 |
+| `Transaction` 事务内缓存 | ✅ | 事务内 `Cache()` 正常 |
+| `FindInBatches` | ✅ | 分批查询各自缓存 |
+| `ScanMap` | ✅ | 需先 `Model`/`Table`（GORM 语义） |
+| `Row()` / `Rows()` 游标 | 🔧 已修复 | 命中缓存短路会返回空游标导致 **panic / "unsupported data type"**，现已内部剥离缓存标记（`withoutCache`） |
+| `Lock(FOR UPDATE/SHARE)` | 🔧 已处理 | 悲观锁命中缓存会跳过 DB 执行、**锁失效**，现已自动剥离缓存标记 |
+| `FirstOrCreate` / `FirstOrInit` | ✅ 已修复 | 原不触发 `AutoGenerateID`、ID 为空，已为 `database.Model` 实现 gorm `BeforeCreate` 钩子修复。注意：`Where` 条件不会自动写入 dest，创建时需在 dest 预填字段值 |
+
+补充：`FirstOrCreate` 需 dest 预填创建值（或 gorm `Attrs`），否则插入空字段——这是 GORM 语义，与缓存无关。
+
 配置示例（`config/config.yaml`）：
 
 ```yaml

@@ -3,6 +3,8 @@ package database
 import (
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 	"github.com/zhoudm1743/go-fast-framework/id"
+
+	"gorm.io/gorm"
 )
 
 // Model 基础模型，所有业务模型应嵌入此结构体。
@@ -25,6 +27,15 @@ func (m *Model) AutoGenerateID() {
 	if m.ID == "" {
 		m.ID = id.New()
 	}
+}
+
+// BeforeCreate 实现 GORM 标准创建前钩子。
+// 覆盖 FirstOrCreate/FirstOrInit 等 GORM 内部创建路径（不经过框架驱动层的
+// invokeBeforeCreate，AutoGenerateID 无法触发），确保所有创建入口都能生成主键 ID。
+// 与框架 Create 的双重调用是安全的：AutoGenerateID 幂等（ID 非空即跳过）。
+func (m *Model) BeforeCreate(tx *gorm.DB) error {
+	m.AutoGenerateID()
+	return nil
 }
 
 // ModelWithSoftDelete 带软删除的基础模型。

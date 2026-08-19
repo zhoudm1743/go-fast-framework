@@ -73,6 +73,8 @@ func (q *GormQuery) GetSchema() string {
 // Cache 对当前查询链开启结果缓存。
 // 通过 context 注入缓存配置，gormCacher（caches.Cacher 实现）据此决定是否读写缓存。
 // 未启用缓存插件的连接上调用本方法无副作用。
+// 注意：Row()/Rows() 等游标类终结方法会内部剥离缓存标记（见 withoutCache），
+// 避免命中缓存时返回空游标导致 panic。
 func (q *GormQuery) Cache(opts ...contracts.CacheOption) contracts.Query {
 	cfg := contracts.NewCacheConfig(opts...)
 	ctx := q.db.Statement.Context
@@ -81,6 +83,20 @@ func (q *GormQuery) Cache(opts ...contracts.CacheOption) contracts.Query {
 	}
 	ctx = context.WithValue(ctx, cacheCtxKey{}, cfg)
 	return q.wrap(q.db.WithContext(ctx))
+}
+
+// withoutCache 返回已剥离缓存标记的查询链。
+// 用于 Row()/Rows() 等返回游标、不适合缓存（无法序列化恢复）的终结方法：
+// 若命中缓存会短路查询回调，游标无法构造，导致 panic 或 "unsupported data type"。
+func (q *GormQuery) withoutCache() *GormQuery {
+	ctx := q.db.Statement.Context
+	if ctx != nil {
+		if _, ok := ctx.Value(cacheCtxKey{}).(contracts.CacheConfig); ok {
+			ctx = context.WithValue(ctx, cacheCtxKey{}, nil)
+			return q.wrap(q.db.WithContext(ctx))
+		}
+	}
+	return q
 }
 
 // applySchema 在终结方法（First/Find/Create 等）执行前处理租户 schema。
@@ -310,11 +326,11 @@ func (q *GormQuery) Pluck(column string, dest any) error {
 }
 
 func (q *GormQuery) Row() contracts.Row {
-	return q.db.Row()
+	return q.withoutCache().db.Row()
 }
 
 func (q *GormQuery) Rows() (contracts.Rows, error) {
-	rows, err := q.db.Rows()
+	rows, err := q.withoutCache().db.Rows()
 	if err != nil {
 		return nil, wrapError(err)
 	}
@@ -467,9 +483,13 @@ func (q *GormQuery) Debug() contracts.Query {
 func (q *GormQuery) Lock(mode contracts.LockMode) contracts.Query {
 	switch mode {
 	case contracts.LockForUpdate:
-		return q.wrap(q.db.Clauses(clause.Locking{Strength: "UPDATE"}))
+		// 悲观锁查询不能被缓存：命中缓存会跳过 DB 执行，导致锁不生效。
+		// 自动剥离缓存标记，保证 FOR UPDATE/SHARE 语义。
+		base := q.withoutCache()
+		return base.wrap(base.db.Clauses(clause.Locking{Strength: "UPDATE"}))
 	case contracts.LockShareMode:
-		return q.wrap(q.db.Clauses(clause.Locking{Strength: "SHARE"}))
+		base := q.withoutCache()
+		return base.wrap(base.db.Clauses(clause.Locking{Strength: "SHARE"}))
 	default:
 		return q
 	}

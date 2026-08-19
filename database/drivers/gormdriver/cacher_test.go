@@ -153,3 +153,93 @@ func TestQueryCache_DisabledPluginNoOp(t *testing.T) {
 		t.Fatalf("查询结果错误: %v", m1.Name)
 	}
 }
+
+// TestQueryCache_RowNoPanic 验证 Cache() 后 Row()/Rows() 不被缓存短路：
+// 游标类终结方法命中缓存会返回空游标导致 panic/报错，应自动剥离缓存标记。
+func TestQueryCache_RowNoPanic(t *testing.T) {
+	drv := newTestDriverWithCaches(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "c005", Name: "eve"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	// Row() 单行扫描
+	var id, name string
+	if err := q.Cache().Model(&TestModel{}).Select("id", "name").
+		Where("id = ?", "c005").Row().Scan(&id, &name); err != nil {
+		t.Fatalf("Cache().Row() 扫描失败: %v", err)
+	}
+	if name != "eve" {
+		t.Fatalf("Row() 结果错误: %v", name)
+	}
+
+	// Rows() 多行遍历
+	rows, err := q.Cache().Model(&TestModel{}).Select("id", "name").Rows()
+	if err != nil {
+		t.Fatalf("Cache().Rows() 失败: %v", err)
+	}
+	defer rows.Close()
+	cnt := 0
+	for rows.Next() {
+		cnt++
+	}
+	if cnt != 1 {
+		t.Fatalf("Rows() 遍历行数错误: %d", cnt)
+	}
+}
+
+// TestQueryCache_ScanMap 验证 ScanMap 与缓存结合正常。
+func TestQueryCache_ScanMap(t *testing.T) {
+	drv := newTestDriverWithCaches(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "c006", Name: "fay"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	var m1, m2 []map[string]any
+	if err := q.Cache().Model(&TestModel{}).Select("id", "name").ScanMap(&m1); err != nil {
+		t.Fatalf("首次 ScanMap 失败: %v", err)
+	}
+	if err := q.Cache().Model(&TestModel{}).Select("id", "name").ScanMap(&m2); err != nil {
+		t.Fatalf("二次 ScanMap 失败: %v", err)
+	}
+	if len(m1) != 1 || len(m2) != 1 {
+		t.Fatalf("ScanMap 行数错误: %d/%d", len(m1), len(m2))
+	}
+	if m1[0]["name"] != m2[0]["name"] {
+		t.Fatalf("ScanMap 两次结果不一致: %v vs %v", m1, m2)
+	}
+}
+
+// TestQueryCache_LockBypassesCache 验证悲观锁查询自动剥离缓存标记：
+// FOR UPDATE 命中缓存会跳过 DB 执行导致锁不生效，应始终走数据库。
+func TestQueryCache_LockBypassesCache(t *testing.T) {
+	drv := newTestDriverWithCaches(t)
+	q := drv.Query()
+
+	if err := q.Create(&TestModel{ID: "c007", Name: "grace"}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	var m1 TestModel
+	if err := q.Cache().Lock(contracts.LockForUpdate).First(&m1, "id = ?", "c007"); err != nil {
+		t.Fatalf("加锁查询失败: %v", err)
+	}
+	if m1.Name != "grace" {
+		t.Fatalf("加锁查询结果错误: %v", m1.Name)
+	}
+
+	// 改库后再次加锁查询：若被缓存应返回旧值，剥离后应返回新值
+	if err := q.Exec("UPDATE test_models SET name = 'grace_v2' WHERE id = ?", "c007"); err != nil {
+		t.Fatalf("直接改库失败: %v", err)
+	}
+	var m2 TestModel
+	if err := q.Cache().Lock(contracts.LockForUpdate).First(&m2, "id = ?", "c007"); err != nil {
+		t.Fatalf("二次加锁查询失败: %v", err)
+	}
+	if m2.Name != "grace_v2" {
+		t.Fatalf("悲观锁查询不应被缓存，期望 grace_v2 实际 %v", m2.Name)
+	}
+}
