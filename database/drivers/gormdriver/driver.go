@@ -21,8 +21,9 @@ import (
 
 // GormDriver 实现 contracts.Driver
 type GormDriver struct {
-	db     *gorm.DB
-	schema string // PostgreSQL schema（用于 AutoMigrate 时显式 SET search_path）
+	db            *gorm.DB
+	schema        string // PostgreSQL schema（用于 AutoMigrate 时显式 SET search_path）
+	cachesEnabled bool   // 查询缓存插件是否已启用（避免重复注册）
 }
 
 var _ contracts.Driver = (*GormDriver)(nil)

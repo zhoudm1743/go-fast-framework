@@ -70,6 +70,19 @@ func (q *GormQuery) GetSchema() string {
 	return q.schema
 }
 
+// Cache 对当前查询链开启结果缓存。
+// 通过 context 注入缓存配置，gormCacher（caches.Cacher 实现）据此决定是否读写缓存。
+// 未启用缓存插件的连接上调用本方法无副作用。
+func (q *GormQuery) Cache(opts ...contracts.CacheOption) contracts.Query {
+	cfg := contracts.NewCacheConfig(opts...)
+	ctx := q.db.Statement.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, cacheCtxKey{}, cfg)
+	return q.wrap(q.db.WithContext(ctx))
+}
+
 // applySchema 在终结方法（First/Find/Create 等）执行前处理租户 schema。
 // 多租户 schema 已通过 Schema() 动态设置 NamingStrategy.TablePrefix，主表与关联表
 // （Preload/Joins）由 GORM 统一生成租户 schema 前缀，此处仅保留兜底逻辑：

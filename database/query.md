@@ -572,6 +572,38 @@ UUID 自动赋值逻辑从 GORM callback 抽取到 `manager.go` 的通用 `Befor
 - [x] `framework/database/orm.go` — 修复错误导入 `gormdriver.io/gorm/logger` → `gorm.io/gorm/logger`
 - [x] `app/models/user.go` — struct tag 从 `gormdriver:"..."` 修正为 `gorm:"..."`
 
+### 查询缓存（Query().Cache()）
+结合 [go-gorm/caches](https://github.com/go-gorm/caches) 与框架 Cache 服务，实现按需查询缓存：
+
+```go
+// 按需开启：仅当前查询链生效，命中缓存时不再访问数据库
+facades.DB().Query().
+    Cache(contracts.CacheTTLOption(1*time.Minute), contracts.CacheTagsOption("users")).
+    Where("status = ?", 1).Find(&list)
+```
+
+设计要点：
+- **按需启用**：`GormQuery.Cache()` 通过 context 注入缓存配置，`gormCacher`（`caches.Cacher` 实现）据此判断——未调用 `Cache()` 的查询不读写缓存，零副作用
+- **存储复用框架 Cache**：底层使用 `contracts.Cache`（memory/redis store），缓存值以 `caches.Query[any]` 序列化（JSON）存储，key 由 SQL + 参数自动生成
+- **写操作自动失效**：插件注册于 Query/Create/Update/Delete callback，写操作调用 `Invalidate`，通过框架 Tags 机制（`gorm:query:cache` 标签）批量清除，不影响其他业务缓存
+- **自定义标签**：`CacheTagsOption` 附加业务标签，可用 `cache.Tags("users").Flush()` 手动失效
+
+实现清单：
+- [x] `contracts/query.go` — 新增 `CacheOption`/`CacheConfig`/`NewCacheConfig` 及 `Query.Cache()` 接口、`QueryCacher` 可选接口
+- [x] `database/drivers/gormdriver/cacher.go` — 实现 `gormCacher` 与 `GormDriver.EnableCaches()`（注册 go-gorm/caches 插件）
+- [x] `database/drivers/gormdriver/query.go` — 实现 `GormQuery.Cache()`（context 标记按需启用）
+- [x] `database/manager.go` — 新增 `dbManager.UseQueryCache()` 遍历连接启用
+- [x] `database/service_provider.go` — Boot 阶段按配置 `database.cache.enabled: true` 注入 cache 服务
+- [x] `database/drivers/gormdriver/cacher_test.go` — 命中/未命中、写操作失效、TTL 与标签、未启用插件无副作用
+
+配置示例（`config/config.yaml`）：
+
+```yaml
+database:
+  cache:
+    enabled: true    # 启用查询缓存插件（默认 false）
+```
+
 ### 暂缓（后续迭代）
 - [ ] `plugins/gofast-xorm/` — xorm Driver & Query 实现
 - [ ] `plugins/gofast-torm/` — torm Driver & Query 实现

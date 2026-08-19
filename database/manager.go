@@ -267,3 +267,25 @@ func (m *dbManager) Register(name string, cfg contracts.ConnectionConfig) error 
 	m.connConfigs[name] = cfg
 	return nil
 }
+
+// UseQueryCache 为所有已建立的连接启用查询缓存插件。
+// 驱动需实现 contracts.QueryCacher（如 GormDriver.EnableCaches）。
+// 仅在显式调用 Query().Cache() 的查询上生效，写操作自动失效缓存。
+func (m *dbManager) UseQueryCache(cache contracts.Cache) error {
+	m.mu.RLock()
+	drivers := make([]contracts.Driver, 0, len(m.connections))
+	for _, drv := range m.connections {
+		drivers = append(drivers, drv)
+	}
+	m.mu.RUnlock()
+
+	var errs []error
+	for _, drv := range drivers {
+		if qc, ok := drv.(contracts.QueryCacher); ok {
+			if err := qc.EnableCaches(cache); err != nil {
+				errs = append(errs, fmt.Errorf("连接 %q 启用查询缓存失败: %w", drv.DriverName(), err))
+			}
+		}
+	}
+	return errorsJoin(errs...)
+}

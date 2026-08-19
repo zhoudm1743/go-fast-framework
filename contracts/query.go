@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
 )
 
 // ── Sentinel Errors ──────────────────────────────────────────────────
@@ -83,6 +84,47 @@ var (
 	// TxReadOnly 只读事务
 	TxReadOnly = TxOpts(sql.LevelDefault, true)
 )
+
+// ── 查询缓存 ────────────────────────────────────────────────────────
+
+// CacheConfig 查询缓存配置。
+type CacheConfig struct {
+	// Store 使用的缓存存储名（如 "memory"、"redis"）。空串表示框架默认存储。
+	Store string
+	// TTL 缓存有效期，<=0 表示永不过期。
+	TTL time.Duration
+	// Tags 额外缓存标签，可通过 cache.Tags(...).Flush() 手动批量失效。
+	Tags []string
+}
+
+// CacheOption 查询缓存配置选项（函数式选项）。
+type CacheOption func(*CacheConfig)
+
+// CacheStoreOption 指定查询缓存使用的缓存存储名。
+func CacheStoreOption(name string) CacheOption {
+	return func(c *CacheConfig) { c.Store = name }
+}
+
+// CacheTTLOption 指定查询缓存有效期。
+func CacheTTLOption(ttl time.Duration) CacheOption {
+	return func(c *CacheConfig) { c.TTL = ttl }
+}
+
+// CacheTagsOption 指定查询缓存附加标签，用于批量手动失效。
+func CacheTagsOption(tags ...string) CacheOption {
+	return func(c *CacheConfig) { c.Tags = tags }
+}
+
+// NewCacheConfig 应用默认值并合并选项，生成缓存配置。
+func NewCacheConfig(opts ...CacheOption) CacheConfig {
+	cfg := CacheConfig{TTL: 5 * time.Minute}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
 
 // ── Row / Rows ───────────────────────────────────────────────────────
 
@@ -182,6 +224,13 @@ type Query interface {
 	// 无 schema 上下文时返回空字符串。
 	GetSchema() string
 
+	// ── 查询缓存（需连接启用缓存插件后生效）──────────────────
+	// 对当前查询链开启结果缓存。缓存键由 SQL 与参数自动生成，
+	// 命中时直接返回缓存结果，不再访问数据库。
+	// 写操作（Create/Update/Delete/Save）会自动失效全部查询缓存。
+	// 示例：facades.DB().Query().Cache(CacheTTLOption(1*time.Minute)).Where(...).Find(&list)
+	Cache(opts ...CacheOption) Query
+
 	// ── 悲观锁 ──────────────────────────────────────────────
 	Lock(mode LockMode) Query
 
@@ -213,6 +262,13 @@ type Driver interface {
 	AutoMigrate(models ...any) error
 	// DriverName 返回驱动标识，如 "gormdriver"、"xorm"、"torm"
 	DriverName() string
+}
+
+// QueryCacher 驱动可选的查询缓存启用接口。
+// 由数据库管理器在框架初始化时调用，为所有连接启用查询缓存插件
+// （底层使用框架 Cache 服务存储，仅 Query().Cache() 显式开启的查询生效）。
+type QueryCacher interface {
+	EnableCaches(cache Cache) error
 }
 
 // ── DB 数据库管理器接口 ──────────────────────────────────────────────
