@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"io/fs"
 	"os"
@@ -29,13 +28,10 @@ import (
 //   - 写入采用同目录临时文件 + os.Rename 原子替换，读操作永远读到完整旧/新文件
 //
 // 并发模型：
-//   - 读无锁（单次 ReadFile）；读-改-写（Increment/Hash）按 key 哈希分片加锁
-//   - 分布式锁为进程内实现（同 memory store）
-//   - Tags 索引落盘至 {dir}/.tags/，进程重启后可继续按 tag 批量失效；
-//     多进程/多副本并发写同一目录时 tag 索引与缓存文件一样存在竞态，需注意
+//   - 读无锁（单次 ReadFile）；读-改-写（Increment/Hash）按目录分片（md5 前 2 位）跨进程文件锁串行化
+//   - CacheLock 基于 .locks/cache/ 下锁文件的跨进程独占锁，支持 TTL 过期回收
+//   - Tags 索引落盘至 {dir}/.tags/，写入时按 tag 跨进程加锁并合并磁盘索引
 const (
-	// fileStripeCount 读-改-写操作的分片锁数量。
-	fileStripeCount = 64
 	// gcWriteInterval 每多少次写操作触发一次全目录 GC 扫描。
 	gcWriteInterval = 1000
 	// cacheFileExt 缓存文件后缀，GC 只清理该后缀文件。
@@ -50,10 +46,9 @@ const (
 type FileStore struct {
 	dir string
 
-	stripes [fileStripeCount]sync.Mutex
-
-	tags  map[string]map[string]struct{}
-	tagMu sync.RWMutex
+	tags    map[string]map[string]struct{}
+	tagMu   sync.RWMutex
+	shardMu sync.Map // 进程内分片互斥，与跨进程文件锁叠加使用
 
 	locks sync.Map
 
@@ -138,11 +133,62 @@ func (s *FileStore) hashFilePath(key string) string {
 	return s.filePath("hash:" + key)
 }
 
-// stripe 返回 key 对应的分片锁，用于读-改-写操作串行化。
-func (s *FileStore) stripe(key string) *sync.Mutex {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return &s.stripes[h.Sum32()%fileStripeCount]
+// shardFromCachePath 从缓存文件路径提取目录分片名（md5 前 2 位）。
+func (s *FileStore) shardFromCachePath(path string) string {
+	rel, err := filepath.Rel(s.dir, path)
+	if err != nil {
+		return "00"
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) > 0 && len(parts[0]) == 2 {
+		return parts[0]
+	}
+	return "00"
+}
+
+func (s *FileStore) shardLockPath(shard string) string {
+	return filepath.Join(s.dir, ".locks", "shards", shard+".lock")
+}
+
+func (s *FileStore) processShardMu(shard string) *sync.Mutex {
+	actual, _ := s.shardMu.LoadOrStore(shard, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
+func (s *FileStore) tagLockPath(tag string) string {
+	sum := md5.Sum([]byte(tag))
+	return filepath.Join(s.dir, ".locks", "tags", hex.EncodeToString(sum[:])+".lock")
+}
+
+// withShardLock 在目录分片级跨进程文件锁保护下执行读-改-写。
+func (s *FileStore) withShardLock(cachePath string, fn func() error) error {
+	shard := s.shardFromCachePath(cachePath)
+	pm := s.processShardMu(shard)
+	pm.Lock()
+	defer pm.Unlock()
+
+	lockPath := s.shardLockPath(shard)
+	f, err := acquireCrossProcessLockBlocking(lockPath, defaultLockWait, defaultLockTTL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = releaseCrossProcessLock(f, lockPath) }()
+	return fn()
+}
+
+// withTagLock 在 tag 级跨进程锁保护下执行索引读写。
+func (s *FileStore) withTagLock(tag string, fn func() error) error {
+	pm := s.processShardMu("tag:" + tag)
+	pm.Lock()
+	defer pm.Unlock()
+
+	lockPath := s.tagLockPath(tag)
+	f, err := acquireCrossProcessLockBlocking(lockPath, defaultLockWait, defaultLockTTL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = releaseCrossProcessLock(f, lockPath) }()
+	return fn()
 }
 
 // encode 将值序列化为存储字符串，与 redis store 保持一致的前缀约定。
@@ -413,31 +459,32 @@ func (s *FileStore) Increment(key string, value ...int64) (int64, error) {
 	if len(value) > 0 {
 		delta = value[0]
 	}
-	st := s.stripe(key)
-	st.Lock()
-	defer st.Unlock()
-
 	path := s.filePath(key)
-	e, found, err := s.readFile(path)
-	if err != nil {
-		return 0, err
-	}
-	if !found {
-		if err := s.writeEntry(path, delta, 0); err != nil {
-			return 0, err
+	var result int64
+	err := s.withShardLock(path, func() error {
+		e, found, err := s.readFile(path)
+		if err != nil {
+			return err
 		}
-		return delta, nil
-	}
-	cur, ok := toInt64(e.value)
-	if !ok {
-		return 0, fmt.Errorf("[GoFast] cache: increment non-numeric value for key %q", key)
-	}
-	n := cur + delta
-	// 保留原有过期时间，与 memory store 行为一致
-	if err := s.writeEntry(path, n, e.expireAt); err != nil {
-		return 0, err
-	}
-	return n, nil
+		if !found {
+			if err := s.writeEntry(path, delta, 0); err != nil {
+				return err
+			}
+			result = delta
+			return nil
+		}
+		cur, ok := toInt64(e.value)
+		if !ok {
+			return fmt.Errorf("[GoFast] cache: increment non-numeric value for key %q", key)
+		}
+		n := cur + delta
+		if err := s.writeEntry(path, n, e.expireAt); err != nil {
+			return err
+		}
+		result = n
+		return nil
+	})
+	return result, err
 }
 
 func (s *FileStore) Decrement(key string, value ...int64) (int64, error) {
@@ -493,13 +540,17 @@ func (s *FileStore) Tags(tags ...string) contracts.TaggedCache {
 
 func (s *FileStore) track(key string, tags []string) error {
 	s.tagMu.Lock()
-	defer s.tagMu.Unlock()
 	for _, tag := range tags {
 		if s.tags[tag] == nil {
 			s.tags[tag] = make(map[string]struct{})
 		}
 		s.tags[tag][key] = struct{}{}
-		if err := s.saveTagIndexLocked(tag); err != nil {
+	}
+	tagCopy := append([]string(nil), tags...)
+	s.tagMu.Unlock()
+
+	for _, tag := range tagCopy {
+		if err := s.persistTagIndex(tag); err != nil {
 			return err
 		}
 	}
@@ -509,13 +560,18 @@ func (s *FileStore) track(key string, tags []string) error {
 // untrack 从所有 tag 组中移除 key（Forget 时同步维护）。
 func (s *FileStore) untrack(key string) {
 	s.tagMu.Lock()
-	defer s.tagMu.Unlock()
+	var affected []string
 	for tag, keys := range s.tags {
 		if _, ok := keys[key]; !ok {
 			continue
 		}
 		delete(keys, key)
-		_ = s.saveTagIndexLocked(tag)
+		affected = append(affected, tag)
+	}
+	s.tagMu.Unlock()
+
+	for _, tag := range affected {
+		_ = s.removeKeyFromTagIndex(tag, key)
 	}
 }
 
@@ -579,7 +635,7 @@ func (s *FileStore) loadTagIndexes() error {
 		}
 		s.tags[idx.Tag] = keys
 		if len(keys) != len(idx.Keys) {
-			if err := s.saveTagIndexLocked(idx.Tag); err != nil {
+			if err := s.writeTagIndexFile(idx.Tag, keys); err != nil {
 				return err
 			}
 		}
@@ -587,16 +643,76 @@ func (s *FileStore) loadTagIndexes() error {
 	return nil
 }
 
-// saveTagIndexLocked 将单个 tag 的索引原子写入磁盘；调用方需已持有 tagMu。
-func (s *FileStore) saveTagIndexLocked(tag string) error {
-	keys := s.tags[tag]
+func (s *FileStore) readTagKeysFromFile(tag string) (map[string]struct{}, error) {
+	path := s.tagFilePath(tag)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]struct{}), nil
+		}
+		return nil, err
+	}
+	var idx tagIndexFile
+	if err := json.Unmarshal(data, &idx); err != nil {
+		return nil, fmt.Errorf("解析 tag 索引 %s 失败: %w", path, err)
+	}
+	keys := make(map[string]struct{}, len(idx.Keys))
+	for _, k := range idx.Keys {
+		if k != "" {
+			keys[k] = struct{}{}
+		}
+	}
+	return keys, nil
+}
+
+// persistTagIndex 在 tag 跨进程锁下合并内存与磁盘索引并落盘。
+func (s *FileStore) persistTagIndex(tag string) error {
+	return s.withTagLock(tag, func() error {
+		diskKeys, err := s.readTagKeysFromFile(tag)
+		if err != nil {
+			return err
+		}
+		s.tagMu.Lock()
+		for k := range s.tags[tag] {
+			diskKeys[k] = struct{}{}
+		}
+		if len(diskKeys) == 0 {
+			delete(s.tags, tag)
+		} else {
+			s.tags[tag] = diskKeys
+		}
+		s.tagMu.Unlock()
+		return s.writeTagIndexFile(tag, diskKeys)
+	})
+}
+
+func (s *FileStore) removeKeyFromTagIndex(tag, key string) error {
+	return s.withTagLock(tag, func() error {
+		diskKeys, err := s.readTagKeysFromFile(tag)
+		if err != nil {
+			return err
+		}
+		delete(diskKeys, key)
+		s.tagMu.Lock()
+		if mem, ok := s.tags[tag]; ok {
+			delete(mem, key)
+			if len(mem) == 0 {
+				delete(s.tags, tag)
+			}
+		}
+		s.tagMu.Unlock()
+		return s.writeTagIndexFile(tag, diskKeys)
+	})
+}
+
+// writeTagIndexFile 将 tag 索引原子写入磁盘；keys 为空时删除索引文件。
+func (s *FileStore) writeTagIndexFile(tag string, keys map[string]struct{}) error {
 	if len(keys) == 0 {
 		path := s.tagFilePath(tag)
 		err := os.Remove(path)
 		if err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		delete(s.tags, tag)
 		return nil
 	}
 	keyList := make([]string, 0, len(keys))
@@ -632,17 +748,6 @@ func (s *FileStore) saveTagIndexLocked(tag string) error {
 	return os.Rename(tmpName, path)
 }
 
-// deleteTagIndexLocked 删除 tag 索引文件；调用方需已持有 tagMu。
-func (s *FileStore) deleteTagIndexLocked(tag string) error {
-	delete(s.tags, tag)
-	path := s.tagFilePath(tag)
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
 // ── Hash 操作 ────────────────────────────────────────────────────────
 
 // readHash 读取哈希文件：值为 field -> 序列化字符串 的 JSON 映射。
@@ -673,16 +778,15 @@ func (s *FileStore) HSet(key, field string, value any) error {
 	if err != nil {
 		return err
 	}
-	st := s.stripe("hash:" + key)
-	st.Lock()
-	defer st.Unlock()
-
-	m, err := s.readHash(key)
-	if err != nil {
-		return err
-	}
-	m[field] = body
-	return s.writeHash(key, m)
+	path := s.hashFilePath(key)
+	return s.withShardLock(path, func() error {
+		m, err := s.readHash(key)
+		if err != nil {
+			return err
+		}
+		m[field] = body
+		return s.writeHash(key, m)
+	})
 }
 
 func (s *FileStore) HGet(key, field string) (any, error) {
@@ -698,26 +802,24 @@ func (s *FileStore) HGet(key, field string) (any, error) {
 }
 
 func (s *FileStore) HDel(key string, fields ...string) error {
-	st := s.stripe("hash:" + key)
-	st.Lock()
-	defer st.Unlock()
-
-	m, err := s.readHash(key)
-	if err != nil {
-		return err
-	}
-	for _, f := range fields {
-		delete(m, f)
-	}
-	if len(m) == 0 {
-		// 空哈希直接删除文件，与 memory store 行为一致
-		err := os.Remove(s.hashFilePath(key))
-		if err != nil && !os.IsNotExist(err) {
+	path := s.hashFilePath(key)
+	return s.withShardLock(path, func() error {
+		m, err := s.readHash(key)
+		if err != nil {
 			return err
 		}
-		return nil
-	}
-	return s.writeHash(key, m)
+		for _, f := range fields {
+			delete(m, f)
+		}
+		if len(m) == 0 {
+			err := os.Remove(path)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		return s.writeHash(key, m)
+	})
 }
 
 func (s *FileStore) HExists(key, field string) bool {
@@ -761,12 +863,14 @@ func (s *FileStore) HKeys(key string) ([]string, error) {
 	return keys, nil
 }
 
-// ── 分布式锁（进程内） ──────────────────────────────────────────────
+// ── 分布式锁（跨进程） ──────────────────────────────────────────────
 
-// Lock 获取进程内锁（同 memory store 语义，多进程/多副本不共享）。
+// Lock 获取跨进程文件锁（基于 .locks/cache/ 下独占锁文件）。
 func (s *FileStore) Lock(key string, ttl time.Duration) contracts.CacheLock {
-	actual, _ := s.locks.LoadOrStore(key, &fileLock{})
-	return actual.(*fileLock)
+	sum := md5.Sum([]byte(key))
+	lockPath := filepath.Join(s.dir, ".locks", "cache", hex.EncodeToString(sum[:])+".lock")
+	actual, _ := s.locks.LoadOrStore(key, &crossProcessCacheLock{lockPath: lockPath, ttl: ttl})
+	return actual.(*crossProcessCacheLock)
 }
 
 // ── GC ───────────────────────────────────────────────────────────────
@@ -869,18 +973,34 @@ func (t *fileTaggedCache) Decrement(key string, value ...int64) (int64, error) {
 }
 
 func (t *fileTaggedCache) Flush() error {
-	t.store.tagMu.Lock()
 	keysToDelete := make(map[string]struct{})
 	var persistErr error
 	for _, tag := range t.tags {
-		for k := range t.store.tags[tag] {
-			keysToDelete[k] = struct{}{}
-		}
-		if err := t.store.deleteTagIndexLocked(tag); err != nil && persistErr == nil {
+		tag := tag
+		if err := t.store.withTagLock(tag, func() error {
+			diskKeys, err := t.store.readTagKeysFromFile(tag)
+			if err != nil {
+				return err
+			}
+			t.store.tagMu.Lock()
+			for k := range t.store.tags[tag] {
+				keysToDelete[k] = struct{}{}
+			}
+			for k := range diskKeys {
+				keysToDelete[k] = struct{}{}
+			}
+			delete(t.store.tags, tag)
+			t.store.tagMu.Unlock()
+			path := t.store.tagFilePath(tag)
+			err = os.Remove(path)
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}); err != nil && persistErr == nil {
 			persistErr = err
 		}
 	}
-	t.store.tagMu.Unlock()
 	if persistErr != nil {
 		return persistErr
 	}
@@ -893,35 +1013,73 @@ func (t *fileTaggedCache) Flush() error {
 	return nil
 }
 
-// ── 进程内锁 ─────────────────────────────────────────────────────────
+// ── 跨进程锁 ─────────────────────────────────────────────────────────
 
-type fileLock struct {
-	acquired atomic.Int32
+type crossProcessCacheLock struct {
+	lockPath string
+	ttl      time.Duration
+	file     *os.File
+	mu       sync.Mutex
 }
 
-func (l *fileLock) Acquire() bool {
-	return l.acquired.CompareAndSwap(0, 1)
+func (l *crossProcessCacheLock) lockTTL() time.Duration {
+	if l.ttl > 0 {
+		return l.ttl
+	}
+	return defaultLockTTL
 }
 
-func (l *fileLock) Release() bool {
-	return l.acquired.CompareAndSwap(1, 0)
-}
-
-func (l *fileLock) ForceRelease() bool {
-	l.acquired.Store(0)
+func (l *crossProcessCacheLock) Acquire() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file != nil {
+		return false
+	}
+	f, ok, err := acquireCrossProcessLock(l.lockPath, l.lockTTL())
+	if err != nil || !ok {
+		return false
+	}
+	l.file = f
 	return true
 }
 
-func (l *fileLock) Block(timeout time.Duration, callback ...func()) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if l.Acquire() {
-			for _, cb := range callback {
-				cb()
-			}
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
+func (l *crossProcessCacheLock) Release() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return false
 	}
-	return false
+	err := releaseCrossProcessLock(l.file, l.lockPath)
+	l.file = nil
+	return err == nil
+}
+
+func (l *crossProcessCacheLock) ForceRelease() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file != nil {
+		_ = releaseCrossProcessLock(l.file, l.lockPath)
+		l.file = nil
+		return true
+	}
+	return forceReleaseCrossProcessLock(l.lockPath) == nil
+}
+
+func (l *crossProcessCacheLock) Block(timeout time.Duration, callback ...func()) bool {
+	f, err := acquireCrossProcessLockBlocking(l.lockPath, timeout, l.lockTTL())
+	if err != nil {
+		return false
+	}
+	l.mu.Lock()
+	if l.file != nil {
+		l.mu.Unlock()
+		_ = releaseCrossProcessLock(f, l.lockPath)
+		return false
+	}
+	l.file = f
+	l.mu.Unlock()
+	for _, cb := range callback {
+		cb()
+	}
+	return true
 }

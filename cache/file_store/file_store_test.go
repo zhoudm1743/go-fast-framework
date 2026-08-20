@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -468,6 +469,84 @@ func TestTags_LoadPrunesStaleKeys(t *testing.T) {
 	}
 }
 
+func TestCrossProcess_LockTwoStores(t *testing.T) {
+	dir := t.TempDir()
+	s1 := newTestStoreDir(t, dir)
+	s2 := newTestStoreDir(t, dir)
+
+	l1 := s1.Lock("res", time.Second)
+	if !l1.Acquire() {
+		t.Fatal("s1 应获取锁")
+	}
+	l2 := s2.Lock("res", time.Second)
+	if l2.Acquire() {
+		t.Fatal("s2 不应在 s1 持锁时获取")
+	}
+	if !l1.Release() {
+		t.Fatal("s1 应释放锁")
+	}
+	if !l2.Acquire() {
+		t.Fatal("s1 释放后 s2 应可获取")
+	}
+	l2.ForceRelease()
+}
+
+func TestCrossProcess_IncrementTwoStores(t *testing.T) {
+	dir := t.TempDir()
+	s1 := newTestStoreDir(t, dir)
+	s2 := newTestStoreDir(t, dir)
+
+	const n = 100
+	var wg sync.WaitGroup
+	var fails atomic.Int32
+	wg.Add(n * 2)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := s1.Increment("cnt"); err != nil {
+				fails.Add(1)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := s2.Increment("cnt"); err != nil {
+				fails.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if fails.Load() > 0 {
+		t.Fatalf("%d 次 Increment 失败", fails.Load())
+	}
+
+	got := s1.GetInt("cnt")
+	if got != n*2 {
+		t.Fatalf("跨进程自增期望 %d，实际 %d", n*2, got)
+	}
+}
+
+func TestCrossProcess_TagIndexTwoStores(t *testing.T) {
+	dir := t.TempDir()
+	s1 := newTestStoreDir(t, dir)
+	s2 := newTestStoreDir(t, dir)
+
+	if err := s1.Tags("users").Put("u:1", "Alice", 0); err != nil {
+		t.Fatalf("s1 Put 失败: %v", err)
+	}
+	if err := s2.Tags("users").Put("u:2", "Bob", 0); err != nil {
+		t.Fatalf("s2 Put 失败: %v", err)
+	}
+
+	s3 := newTestStoreDir(t, dir)
+	tagged := s3.Tags("users")
+	if err := tagged.Flush(); err != nil {
+		t.Fatalf("Flush 失败: %v", err)
+	}
+	if s3.Has("u:1") || s3.Has("u:2") {
+		t.Fatal("跨进程 tag 索引合并后 Flush 应清除全部关联 key")
+	}
+}
+
 // ── 锁 ────────────────────────────────────────────────────────────────
 
 func TestLock_AcquireRelease(t *testing.T) {
@@ -489,6 +568,7 @@ func TestLock_AcquireRelease(t *testing.T) {
 	if !l.Acquire() {
 		t.Fatal("强制释放后应可获取")
 	}
+	l.ForceRelease()
 }
 
 func TestLock_Block(t *testing.T) {
@@ -505,6 +585,7 @@ func TestLock_Block(t *testing.T) {
 	if !l.Block(500*time.Millisecond, func() { executed = true }) || !executed {
 		t.Fatal("Block 应在释放后成功执行 callback")
 	}
+	l.ForceRelease()
 }
 
 func TestLock_BlockTimeout(t *testing.T) {
@@ -801,5 +882,5 @@ func TestConcurrent_FlushAndPut(t *testing.T) {
 func TestImplementsCacheStore(t *testing.T) {
 	var _ contracts.CacheStore = (*FileStore)(nil)
 	var _ contracts.TaggedCache = (*fileTaggedCache)(nil)
-	var _ contracts.CacheLock = (*fileLock)(nil)
+	var _ contracts.CacheLock = (*crossProcessCacheLock)(nil)
 }
