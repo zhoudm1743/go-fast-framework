@@ -388,6 +388,86 @@ func TestTags_FlushIsolation(t *testing.T) {
 	}
 }
 
+func TestTags_IndexPersistedOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestStoreDir(t, dir)
+	tagged := s.Tags("users", "api")
+	if err := tagged.Put("u:1", "Alice", 0); err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+
+	tagPath := s.tagFilePath("users")
+	if _, err := os.Stat(tagPath); err != nil {
+		t.Fatalf("tag 索引文件应存在: %v", err)
+	}
+	data, err := os.ReadFile(tagPath)
+	if err != nil {
+		t.Fatalf("读取 tag 索引失败: %v", err)
+	}
+	if !strings.Contains(string(data), `"u:1"`) || !strings.Contains(string(data), `"users"`) {
+		t.Fatalf("tag 索引内容异常: %s", data)
+	}
+}
+
+func TestTags_PersistAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	s1 := newTestStoreDir(t, dir)
+	tagged := s1.Tags("users")
+	if err := tagged.Put("u:1", "Alice", 0); err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+	if err := tagged.PutMany(map[string]any{"u:2": "Bob"}, 0); err != nil {
+		t.Fatalf("PutMany 失败: %v", err)
+	}
+	_ = s1.Put("other", "keep", 0)
+	s1.Stop()
+
+	s2 := newTestStoreDir(t, dir)
+	if !s2.Has("u:1") || !s2.Has("u:2") {
+		t.Fatal("重启后缓存文件应仍在")
+	}
+	tagged2 := s2.Tags("users")
+	if err := tagged2.Flush(); err != nil {
+		t.Fatalf("重启后 tagged Flush 失败: %v", err)
+	}
+	if s2.Has("u:1") || s2.Has("u:2") {
+		t.Fatal("重启后 tagged Flush 应清除关联 key")
+	}
+	if !s2.Has("other") {
+		t.Fatal("无标签 key 不应被清除")
+	}
+	if _, err := os.Stat(s2.tagFilePath("users")); !os.IsNotExist(err) {
+		t.Fatal("Flush 后 tag 索引文件应删除")
+	}
+}
+
+func TestTags_LoadPrunesStaleKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	s1 := newTestStoreDir(t, dir)
+	if err := s1.Tags("users").Put("gone", "x", 0); err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+	if err := s1.Tags("users").Put("stay", "y", 0); err != nil {
+		t.Fatalf("Put 失败: %v", err)
+	}
+	s1.Stop()
+
+	_ = os.Remove(s1.filePath("gone"))
+
+	s2 := newTestStoreDir(t, dir)
+	s2.tagMu.RLock()
+	keys := s2.tags["users"]
+	s2.tagMu.RUnlock()
+	if _, ok := keys["gone"]; ok {
+		t.Fatal("启动加载应剔除已无缓存文件的 stale key")
+	}
+	if _, ok := keys["stay"]; !ok {
+		t.Fatal("有效 key 应保留在 tag 索引中")
+	}
+}
+
 // ── 锁 ────────────────────────────────────────────────────────────────
 
 func TestLock_AcquireRelease(t *testing.T) {

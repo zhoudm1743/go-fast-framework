@@ -30,8 +30,9 @@ import (
 //
 // 并发模型：
 //   - 读无锁（单次 ReadFile）；读-改-写（Increment/Hash）按 key 哈希分片加锁
-//   - 分布式锁为进程内实现（同 memory store），Tags 状态为进程内维护，
-//     多副本部署时与 memory store 同级别，需注意
+//   - 分布式锁为进程内实现（同 memory store）
+//   - Tags 索引落盘至 {dir}/.tags/，进程重启后可继续按 tag 批量失效；
+//     多进程/多副本并发写同一目录时 tag 索引与缓存文件一样存在竞态，需注意
 const (
 	// fileStripeCount 读-改-写操作的分片锁数量。
 	fileStripeCount = 64
@@ -39,6 +40,10 @@ const (
 	gcWriteInterval = 1000
 	// cacheFileExt 缓存文件后缀，GC 只清理该后缀文件。
 	cacheFileExt = ".cache"
+	// tagDirName tag 索引子目录（不参与 .cache GC 扫描）。
+	tagDirName = ".tags"
+	// tagFileExt tag 索引文件后缀。
+	tagFileExt = ".tag"
 )
 
 // FileStore 基于本地文件系统的缓存存储实现。
@@ -79,6 +84,9 @@ func New(path string, gcInterval time.Duration) (*FileStore, error) {
 	s := &FileStore{
 		dir:  abs,
 		tags: make(map[string]map[string]struct{}),
+	}
+	if err := s.loadTagIndexes(); err != nil {
+		return nil, fmt.Errorf("[GoFast] 加载 tag 索引失败: %w", err)
 	}
 	s.startGC(gcInterval)
 	return s, nil
@@ -483,7 +491,7 @@ func (s *FileStore) Tags(tags ...string) contracts.TaggedCache {
 	return &fileTaggedCache{store: s, tags: tags}
 }
 
-func (s *FileStore) track(key string, tags []string) {
+func (s *FileStore) track(key string, tags []string) error {
 	s.tagMu.Lock()
 	defer s.tagMu.Unlock()
 	for _, tag := range tags {
@@ -491,16 +499,148 @@ func (s *FileStore) track(key string, tags []string) {
 			s.tags[tag] = make(map[string]struct{})
 		}
 		s.tags[tag][key] = struct{}{}
+		if err := s.saveTagIndexLocked(tag); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // untrack 从所有 tag 组中移除 key（Forget 时同步维护）。
 func (s *FileStore) untrack(key string) {
 	s.tagMu.Lock()
 	defer s.tagMu.Unlock()
-	for _, keys := range s.tags {
+	for tag, keys := range s.tags {
+		if _, ok := keys[key]; !ok {
+			continue
+		}
 		delete(keys, key)
+		_ = s.saveTagIndexLocked(tag)
 	}
+}
+
+// tagDir 返回 tag 索引目录路径。
+func (s *FileStore) tagDir() string {
+	return filepath.Join(s.dir, tagDirName)
+}
+
+// tagFilePath 将 tag 名映射为索引文件路径（md5 哈希，避免特殊字符与路径穿越）。
+func (s *FileStore) tagFilePath(tag string) string {
+	sum := md5.Sum([]byte(tag))
+	hexStr := hex.EncodeToString(sum[:])
+	return filepath.Join(s.tagDir(), hexStr+tagFileExt)
+}
+
+type tagIndexFile struct {
+	Tag  string   `json:"tag"`
+	Keys []string `json:"keys"`
+}
+
+// loadTagIndexes 启动时从磁盘加载全部 tag 索引，并剔除已无对应缓存文件的 stale key。
+func (s *FileStore) loadTagIndexes() error {
+	s.tagMu.Lock()
+	defer s.tagMu.Unlock()
+
+	entries, err := os.ReadDir(s.tagDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), tagFileExt) {
+			continue
+		}
+		path := filepath.Join(s.tagDir(), ent.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var idx tagIndexFile
+		if err := json.Unmarshal(data, &idx); err != nil {
+			return fmt.Errorf("解析 tag 索引 %s 失败: %w", path, err)
+		}
+		if idx.Tag == "" {
+			continue
+		}
+		keys := make(map[string]struct{}, len(idx.Keys))
+		for _, k := range idx.Keys {
+			if k == "" {
+				continue
+			}
+			if s.Has(k) {
+				keys[k] = struct{}{}
+			}
+		}
+		if len(keys) == 0 {
+			_ = os.Remove(path)
+			continue
+		}
+		s.tags[idx.Tag] = keys
+		if len(keys) != len(idx.Keys) {
+			if err := s.saveTagIndexLocked(idx.Tag); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// saveTagIndexLocked 将单个 tag 的索引原子写入磁盘；调用方需已持有 tagMu。
+func (s *FileStore) saveTagIndexLocked(tag string) error {
+	keys := s.tags[tag]
+	if len(keys) == 0 {
+		path := s.tagFilePath(tag)
+		err := os.Remove(path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		delete(s.tags, tag)
+		return nil
+	}
+	keyList := make([]string, 0, len(keys))
+	for k := range keys {
+		keyList = append(keyList, k)
+	}
+	body, err := json.Marshal(tagIndexFile{Tag: tag, Keys: keyList})
+	if err != nil {
+		return err
+	}
+	path := s.tagFilePath(tag)
+	if err := os.MkdirAll(s.tagDir(), 0o755); err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".go-fast-tag-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// deleteTagIndexLocked 删除 tag 索引文件；调用方需已持有 tagMu。
+func (s *FileStore) deleteTagIndexLocked(tag string) error {
+	delete(s.tags, tag)
+	path := s.tagFilePath(tag)
+	err := os.Remove(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // ── Hash 操作 ────────────────────────────────────────────────────────
@@ -685,44 +825,65 @@ func (t *fileTaggedCache) Has(key string) bool               { return t.store.Ha
 func (t *fileTaggedCache) Many(keys []string) map[string]any { return t.store.Many(keys) }
 
 func (t *fileTaggedCache) Put(key string, value any, ttl time.Duration) error {
-	t.store.track(key, t.tags)
-	return t.store.Put(key, value, ttl)
+	if err := t.store.Put(key, value, ttl); err != nil {
+		return err
+	}
+	return t.store.track(key, t.tags)
 }
 
 func (t *fileTaggedCache) Forever(key string, value any) error {
-	t.store.track(key, t.tags)
-	return t.store.Forever(key, value)
+	if err := t.store.Forever(key, value); err != nil {
+		return err
+	}
+	return t.store.track(key, t.tags)
 }
 
 func (t *fileTaggedCache) Forget(key string) error { return t.store.Forget(key) }
 
 func (t *fileTaggedCache) PutMany(values map[string]any, ttl time.Duration) error {
-	for k := range values {
-		t.store.track(k, t.tags)
+	if err := t.store.PutMany(values, ttl); err != nil {
+		return err
 	}
-	return t.store.PutMany(values, ttl)
+	for k := range values {
+		if err := t.store.track(k, t.tags); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (t *fileTaggedCache) Increment(key string, value ...int64) (int64, error) {
-	t.store.track(key, t.tags)
-	return t.store.Increment(key, value...)
+	n, err := t.store.Increment(key, value...)
+	if err != nil {
+		return n, err
+	}
+	return n, t.store.track(key, t.tags)
 }
 
 func (t *fileTaggedCache) Decrement(key string, value ...int64) (int64, error) {
-	t.store.track(key, t.tags)
-	return t.store.Decrement(key, value...)
+	n, err := t.store.Decrement(key, value...)
+	if err != nil {
+		return n, err
+	}
+	return n, t.store.track(key, t.tags)
 }
 
 func (t *fileTaggedCache) Flush() error {
 	t.store.tagMu.Lock()
 	keysToDelete := make(map[string]struct{})
+	var persistErr error
 	for _, tag := range t.tags {
 		for k := range t.store.tags[tag] {
 			keysToDelete[k] = struct{}{}
 		}
-		delete(t.store.tags, tag)
+		if err := t.store.deleteTagIndexLocked(tag); err != nil && persistErr == nil {
+			persistErr = err
+		}
 	}
 	t.store.tagMu.Unlock()
+	if persistErr != nil {
+		return persistErr
+	}
 
 	for k := range keysToDelete {
 		if err := t.store.Forget(k); err != nil {
