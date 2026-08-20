@@ -1,9 +1,10 @@
 package cache
 
 import (
-	"fmt"
+	"log"
 	"time"
 
+	fileStore "github.com/zhoudm1743/go-fast-framework/cache/file_store"
 	redisStore "github.com/zhoudm1743/go-fast-framework/cache/redis_store"
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 )
@@ -15,20 +16,40 @@ type cacheManager struct {
 }
 
 // NewCacheManager 根据配置创建缓存管理器。
+//
+// 驱动策略（降级链 redis → file → memory）：
+//   - 未配置 cache.driver 时默认使用 file（跨重启持久化，无外部依赖）
+//   - 配置了 cache.redis（host 或 driver=redis）则优先 redis；连接失败自动降级为 file
+//   - file 目录不可用（权限/路径非法）时降级为 memory
+//   - memory 为最终兜底，总是可用
+//
+// 降级只影响默认 store，用户仍可通过 Store("redis")/Store("file") 显式使用可用驱动。
 func NewCacheManager(cfg contracts.Config) (contracts.Cache, error) {
-	defaultStore := cfg.GetString("cache.driver", "memory")
-	shardCount := cfg.GetInt("cache.memory.shard_count", 32)
-	gcSec := cfg.GetInt("cache.memory.clean_interval", 60)
+	driver := cfg.GetString("cache.driver", "file")
 
 	m := &cacheManager{
 		stores:       make(map[string]contracts.CacheStore),
-		defaultStore: defaultStore,
+		defaultStore: "memory",
 	}
 
+	// memory store：最终兜底，总是可用
+	shardCount := cfg.GetInt("cache.memory.shard_count", 32)
+	gcSec := cfg.GetInt("cache.memory.clean_interval", 60)
 	m.stores["memory"] = NewMemoryStore(shardCount, time.Duration(gcSec)*time.Second)
 
-	// 如果配置了 Redis，初始化 Redis store
-	if cfg.GetString("cache.redis.host", "") != "" || defaultStore == "redis" {
+	// file store：默认驱动与 redis 的降级目标，总是尝试初始化
+	filePath := cfg.GetString("cache.file.path", "storage/cache")
+	fileGCSec := cfg.GetInt("cache.file.clean_interval", 600)
+	fs, fileErr := fileStore.New(filePath, time.Duration(fileGCSec)*time.Second)
+	if fileErr == nil {
+		m.stores["file"] = fs
+	}
+
+	// redis store：仅在配置了 host 或期望驱动为 redis 时尝试连接
+	redisAttempted := false
+	var redisErr error
+	if cfg.GetString("cache.redis.host", "") != "" || driver == "redis" {
+		redisAttempted = true
 		redisCfg := redisStore.Config{
 			Host:     cfg.GetString("cache.redis.host", "127.0.0.1"),
 			Port:     cfg.GetInt("cache.redis.port", 6379),
@@ -38,11 +59,36 @@ func NewCacheManager(cfg contracts.Config) (contracts.Cache, error) {
 		}
 		rs, err := redisStore.New(redisCfg)
 		if err != nil {
-			// 配置了 redis 却连接失败时必须显式报错（fail-fast），
-			// 避免静默降级 memory 导致多副本缓存不一致等隐蔽问题。
-			return nil, fmt.Errorf("[GoFast] 初始化 redis 缓存失败: %w", err)
+			redisErr = err
+		} else {
+			m.stores["redis"] = rs
 		}
-		m.stores["redis"] = rs
+	}
+
+	// 按降级链决定实际默认 store
+	switch driver {
+	case "redis":
+		if _, ok := m.stores["redis"]; ok {
+			m.defaultStore = "redis"
+		} else if _, ok := m.stores["file"]; ok {
+			log.Printf("[GoFast][cache] 警告: redis 缓存连接失败（%v），已降级为文件缓存", redisErr)
+			m.defaultStore = "file"
+		} else {
+			log.Printf("[GoFast][cache] 警告: redis 缓存连接失败（%v），文件缓存不可用（%v），已降级为内存缓存", redisErr, fileErr)
+		}
+	case "file":
+		if _, ok := m.stores["file"]; ok {
+			m.defaultStore = "file"
+		} else {
+			log.Printf("[GoFast][cache] 警告: 文件缓存不可用（%v），已降级为内存缓存", fileErr)
+		}
+	default:
+		// 显式配置 memory 或其他未知驱动：默认 store 保持 memory
+	}
+
+	// redis 已配置但连接失败，且期望驱动不是 redis（switch 已处理 driver=redis 的降级警告）时，提醒用户
+	if redisAttempted && redisErr != nil && driver != "redis" {
+		log.Printf("[GoFast][cache] 警告: redis 缓存连接失败，Store(\"redis\") 不可用: %v", redisErr)
 	}
 
 	return m, nil
@@ -51,8 +97,11 @@ func NewCacheManager(cfg contracts.Config) (contracts.Cache, error) {
 // Stop 停止所有可停止的 store。
 func (m *cacheManager) Stop() {
 	for _, s := range m.stores {
-		if ms, ok := s.(*memoryStore); ok {
-			ms.Stop()
+		switch st := s.(type) {
+		case *memoryStore:
+			st.Stop()
+		case *fileStore.FileStore:
+			st.Stop()
 		}
 	}
 }

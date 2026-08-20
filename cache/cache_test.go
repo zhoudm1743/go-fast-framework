@@ -1,7 +1,8 @@
 package cache
 
 import (
-	"strings"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -208,9 +209,9 @@ func TestConcurrentSafety(t *testing.T) {
 	// 只要不 panic / deadlock 即为通过
 }
 
-// TestNewCacheManager_RedisUnavailable 验证 redis 连接失败时 fail-fast 返回错误，
-// 而不是静默降级到 memory（多副本下内存缓存不一致的隐蔽问题根源）。
-func TestNewCacheManager_RedisUnavailable(t *testing.T) {
+// TestNewCacheManager_RedisFallbackToFile 验证 redis 连接失败时自动降级为文件缓存，
+// 而不是返回错误（客户场景：redis 抖动不应导致应用启动失败）。
+func TestNewCacheManager_RedisFallbackToFile(t *testing.T) {
 	cfg, err := config.NewConfig("/nonexistent/cache-test.yaml")
 	if err != nil {
 		t.Fatalf("构造空配置失败: %v", err)
@@ -218,12 +219,134 @@ func TestNewCacheManager_RedisUnavailable(t *testing.T) {
 	cfg.Set("cache.driver", "redis")
 	cfg.Set("cache.redis.host", "127.0.0.1")
 	cfg.Set("cache.redis.port", 1) // 必然被拒绝的端口，确保连接失败
+	cfg.Set("cache.file.path", t.TempDir())
 
-	_, err = NewCacheManager(cfg)
-	if err == nil {
-		t.Fatal("redis 连接失败应返回错误，而不是静默降级 memory")
+	m, err := NewCacheManager(cfg)
+	if err != nil {
+		t.Fatalf("redis 连接失败不应导致初始化报错: %v", err)
 	}
-	if !strings.Contains(err.Error(), "初始化 redis 缓存失败") {
-		t.Fatalf("错误信息应指明 redis 初始化失败，实际: %v", err)
+	cm := m.(*cacheManager)
+	defer cm.Stop()
+
+	if cm.defaultStore != "file" {
+		t.Fatalf("redis 不可用时应降级为 file，实际 %s", cm.defaultStore)
+	}
+	if err := m.Put("k", "v", time.Minute); err != nil {
+		t.Fatalf("降级后写入失败: %v", err)
+	}
+	if m.GetString("k") != "v" {
+		t.Fatal("降级后读取失败")
+	}
+}
+
+// TestNewCacheManager_RedisFileFallbackToMemory 验证 redis 与 file 均不可用时的兜底链。
+func TestNewCacheManager_RedisFileFallbackToMemory(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.NewConfig("/nonexistent/cache-test.yaml")
+	if err != nil {
+		t.Fatalf("构造空配置失败: %v", err)
+	}
+	cfg.Set("cache.driver", "redis")
+	cfg.Set("cache.redis.host", "127.0.0.1")
+	cfg.Set("cache.redis.port", 1)
+	cfg.Set("cache.file.path", f) // 文件缓存目录不可用
+
+	m, err := NewCacheManager(cfg)
+	if err != nil {
+		t.Fatalf("应兜底为内存缓存而非报错: %v", err)
+	}
+	cm := m.(*cacheManager)
+	defer cm.Stop()
+
+	if cm.defaultStore != "memory" {
+		t.Fatalf("redis/file 均不可用时应降级为 memory，实际 %s", cm.defaultStore)
+	}
+	if err := m.Put("k", "v", time.Minute); err != nil {
+		t.Fatalf("降级后写入失败: %v", err)
+	}
+	if m.GetString("k") != "v" {
+		t.Fatal("降级后读取失败")
+	}
+}
+
+// TestNewCacheManager_DefaultDriverIsFile 验证未配置驱动时默认使用文件缓存。
+func TestNewCacheManager_DefaultDriverIsFile(t *testing.T) {
+	cfg, err := config.NewConfig("/nonexistent/cache-test.yaml")
+	if err != nil {
+		t.Fatalf("构造空配置失败: %v", err)
+	}
+	cfg.Set("cache.file.path", t.TempDir())
+
+	m, err := NewCacheManager(cfg)
+	if err != nil {
+		t.Fatalf("初始化失败: %v", err)
+	}
+	cm := m.(*cacheManager)
+	defer cm.Stop()
+
+	if cm.defaultStore != "file" {
+		t.Fatalf("未配置驱动时默认应为 file，实际 %s", cm.defaultStore)
+	}
+}
+
+// TestNewCacheManager_FileDriver 验证 file 驱动经管理器正常读写与关闭。
+func TestNewCacheManager_FileDriver(t *testing.T) {
+	cfg, err := config.NewConfig("/nonexistent/cache-test.yaml")
+	if err != nil {
+		t.Fatalf("构造空配置失败: %v", err)
+	}
+	cfg.Set("cache.driver", "file")
+	cfg.Set("cache.file.path", t.TempDir())
+
+	m, err := NewCacheManager(cfg)
+	if err != nil {
+		t.Fatalf("file 驱动初始化失败: %v", err)
+	}
+	cm := m.(*cacheManager)
+	defer cm.Stop()
+
+	if m.Store("file") == nil || m.Store("file") != cm.defaultCacheStore() {
+		t.Fatal("file store 应为默认 store")
+	}
+	if err := m.Put("k", "v", time.Minute); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	if m.GetString("k") != "v" {
+		t.Fatal("读取失败")
+	}
+	cm.Stop() // 可重复调用
+}
+
+// TestNewCacheManager_FileFallbackToMemory 验证文件缓存路径不可用时降级为内存缓存。
+func TestNewCacheManager_FileFallbackToMemory(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.NewConfig("/nonexistent/cache-test.yaml")
+	if err != nil {
+		t.Fatalf("构造空配置失败: %v", err)
+	}
+	cfg.Set("cache.driver", "file")
+	cfg.Set("cache.file.path", f)
+
+	m, err := NewCacheManager(cfg)
+	if err != nil {
+		t.Fatalf("文件缓存不可用应降级而非报错: %v", err)
+	}
+	cm := m.(*cacheManager)
+	defer cm.Stop()
+
+	if cm.defaultStore != "memory" {
+		t.Fatalf("file 不可用时应降级为 memory，实际 %s", cm.defaultStore)
+	}
+	if err := m.Put("k", "v", time.Minute); err != nil {
+		t.Fatalf("降级后写入失败: %v", err)
+	}
+	if m.GetString("k") != "v" {
+		t.Fatal("降级后读取失败")
 	}
 }

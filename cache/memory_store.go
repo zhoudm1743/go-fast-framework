@@ -90,7 +90,11 @@ func (s *memoryStore) gc(interval time.Duration) {
 }
 
 func (s *memoryStore) Stop() {
-	close(s.stopGC)
+	select {
+	case <-s.stopGC:
+	default:
+		close(s.stopGC)
+	}
 }
 
 func (s *memoryStore) Get(key string, def ...any) any {

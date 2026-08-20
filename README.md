@@ -76,7 +76,7 @@ func main() {
 | **config** | `config/` | 基于 Viper 的配置管理，Go 代码 + YAML 双模式 |
 | **log** | `log/` | 基于 Zap 的结构化日志，控制台/文件/混合输出 |
 | **database** | `database/` | 基于 GORM 的数据库服务，多连接、时序 ID |
-| **cache** | `cache/` | 缓存服务，支持内存/Redis 驱动 |
+| **cache** | `cache/` | 缓存服务，支持内存/Redis/文件驱动 |
 | **http** | `http/` | HTTP 路由服务，双引擎（Gin / Fiber） |
 | **filesystem** | `filesystem/` | 文件存储，本地/OSS/COS/MinIO/S3 |
 | **jwt** | `jwt/` | JWT 鉴权服务 |
