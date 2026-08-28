@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
+	"github.com/zhoudm1743/go-fast-framework/utils"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -440,13 +441,8 @@ func (q *GormQuery) RollbackTo(name string) error {
 // ── 分页 ─────────────────────────────────────────────────────────────
 
 func (q *GormQuery) Paginate(page, size int) contracts.Query {
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = 20
-	}
-	return q.wrap(q.db.Offset((page - 1) * size).Limit(size))
+	page, size = utils.PageUtil.Normalize(page, size)
+	return q.wrap(q.db.Offset(utils.PageUtil.Offset(page, size)).Limit(size))
 }
 
 // ── 作用域 ───────────────────────────────────────────────────────────

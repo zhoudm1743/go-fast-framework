@@ -15,6 +15,9 @@ func TestQueryInt(t *testing.T) {
 	if v := QueryInt("abc", 7); v != 7 {
 		t.Fatalf("解析失败期望默认 7，实际 %d", v)
 	}
+	if v := QueryInt(" 42 "); v != 42 {
+		t.Fatalf("带空格期望 Trim 后 42，实际 %d", v)
+	}
 }
 
 func TestQueryInt64(t *testing.T) {

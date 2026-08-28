@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
+	"github.com/zhoudm1743/go-fast-framework/utils"
 )
 
 // Response 是 GoFast 标准 JSON 响应结构。
@@ -174,12 +175,7 @@ func (r *Response) Paginate(list any, total int64, page int, size int, message .
 	if len(message) > 0 && message[0] != "" {
 		msg = message[0]
 	}
-	if page <= 0 {
-		page = 1
-	}
-	if size <= 0 {
-		size = 20
-	}
+	page, size = utils.PageUtil.Normalize(page, size)
 	return r.Build(http.StatusOK, 0, msg, map[string]any{
 		"list":  list,
 		"total": total,

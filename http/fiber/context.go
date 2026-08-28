@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"reflect"
-	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -263,29 +262,6 @@ func bindURI(obj any, params func(key string, defaultValue ...string) string) {
 		if !fv.CanSet() {
 			continue
 		}
-		setFieldFromString(fv, val)
-	}
-}
-
-func setFieldFromString(fv reflect.Value, val string) {
-	switch fv.Kind() {
-	case reflect.String:
-		fv.SetString(val)
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-			fv.SetInt(n)
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		if n, err := strconv.ParseUint(val, 10, 64); err == nil {
-			fv.SetUint(n)
-		}
-	case reflect.Float32, reflect.Float64:
-		if f, err := strconv.ParseFloat(val, 64); err == nil {
-			fv.SetFloat(f)
-		}
-	case reflect.Bool:
-		if b, err := strconv.ParseBool(val); err == nil {
-			fv.SetBool(b)
-		}
+		base.SetFieldFromString(fv, val)
 	}
 }
