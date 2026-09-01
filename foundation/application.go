@@ -53,6 +53,12 @@ type Application interface {
 	Fast() contracts.Fast
 	// Validator 获取验证服务（等同于 MustMake("validator").(contracts.Validation)）。
 	Validator() contracts.Validation
+	// Process 获取进程管理服务（等同于 MustMake("process").(contracts.Process)）。
+	Process() contracts.Process
+	// Mock 获取 Mock 管理服务（等同于 MustMake("mock").(contracts.MockManager)）。
+	Mock() contracts.MockManager
+	// Gate 获取授权服务（等同于 MustMake("gate").(contracts.Gate)）。
+	Gate() contracts.Gate
 }
 
 // deferredEntry 将一个 DeferredProvider 与 sync.Once 绑定，保证线程安全地只初始化一次。
@@ -334,4 +340,16 @@ func (a *application) Fast() contracts.Fast {
 
 func (a *application) Validator() contracts.Validation {
 	return a.MustMake("validator").(contracts.Validation)
+}
+
+func (a *application) Process() contracts.Process {
+	return a.MustMake("process").(contracts.Process)
+}
+
+func (a *application) Mock() contracts.MockManager {
+	return a.MustMake("mock").(contracts.MockManager)
+}
+
+func (a *application) Gate() contracts.Gate {
+	return a.MustMake("gate").(contracts.Gate)
 }

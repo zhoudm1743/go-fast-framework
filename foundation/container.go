@@ -20,6 +20,8 @@ type Container interface {
 	MustMake(key string) any
 	// Bound 检查 key 是否已绑定。
 	Bound(key string) bool
+	// Unbind 移除指定 key 的绑定（测试 / Mock 场景使用）。
+	Unbind(key string)
 	// Flush 清空所有绑定和缓存（测试用）。
 	Flush()
 }
@@ -137,6 +139,12 @@ func (c *container) Bound(key string) bool {
 	defer c.mu.RUnlock()
 	_, ok := c.bindings[key]
 	return ok
+}
+
+func (c *container) Unbind(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.bindings, key)
 }
 
 func (c *container) Flush() {
