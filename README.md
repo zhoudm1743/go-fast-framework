@@ -120,6 +120,34 @@ if err := ctx.Bind(&req); err != nil {
 
 ---
 
+## HTTP 服务配置
+
+以下配置均为可选项，写入 `config/config.yaml` 即可生效（Gin / Fiber 双引擎行为一致）：
+
+```yaml
+server:
+  driver: fiber                 # HTTP 引擎：fiber（默认）| gin
+  host: 0.0.0.0
+  port: 8080
+  cors_allow_origins:           # 放行的跨域来源，默认 "*"
+    - https://app.example.com
+    - https://admin.example.com
+  cors_allow_methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS"       # 放行的跨域方法，默认同左
+  cors_allow_headers: "Origin,Content-Type,Accept,Authorization,X-Token"  # 放行的跨域请求头（默认不含 X-Token 等自定义头）
+  cors_expose_headers: "X-Request-ID,X-Total-Count"             # 允许浏览器脚本读取的响应头，默认不输出
+  cors_allow_credentials: true  # 允许携带 Cookie 等凭据；未配置时仅当 origins 非 * 时自动开启
+  cors_max_age: 86400           # 预检结果缓存秒数，默认 86400；<=0 不输出该头
+  security_headers_enabled: true          # 基础安全响应头，默认关闭
+  security_hsts_max_age: 31536000         # HSTS max-age，默认 31536000；<=0 不输出 HSTS
+```
+
+说明：
+
+- **CORS**：`cors_allow_origins` 支持字符串数组或逗号分隔字符串。配置多个来源时按请求 `Origin` 逐请求回显命中的值；启用 `cors_allow_credentials` 后即使来源为 `*` 也会回显具体 Origin（CORS 规范禁止 `*` 搭配凭据）。
+- **安全响应头**：开启 `security_headers_enabled` 后每个响应附带 `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: strict-origin-when-cross-origin`，HTTPS 请求额外附带 HSTS。
+
+---
+
 ## License
 
 [Apache 2.0](LICENSE)

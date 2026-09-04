@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/zhoudm1743/go-fast-framework/contracts"
+	"github.com/zhoudm1743/go-fast-framework/http/cors"
 )
 
 // route 实现 contracts.Route，封装 Gin。
@@ -49,20 +50,13 @@ func NewRoute(cfg contracts.Config, validator contracts.Validation, storage cont
 	// 请求 ID 中间件
 	engine.Use(requestIDMiddleware())
 
-	// CORS 中间件
-	allowOrigins := "*"
-	if originsRaw := cfg.Get("server.cors_allow_origins"); originsRaw != nil {
-		if origins, ok := originsRaw.([]any); ok && len(origins) > 0 {
-			allowOrigins = ""
-			for i, o := range origins {
-				if i > 0 {
-					allowOrigins += ","
-				}
-				allowOrigins += fmt.Sprintf("%v", o)
-			}
-		}
+	// 基础安全响应头中间件（默认关闭，server.security_headers_enabled 开启）
+	if cfg.GetBool("server.security_headers_enabled") {
+		engine.Use(securityHeadersMiddleware(cors.HSTSMaxAge(cfg)))
 	}
-	engine.Use(corsMiddleware(allowOrigins))
+
+	// CORS 中间件
+	engine.Use(corsMiddleware(cors.Load(cfg)))
 
 	// 健康检查
 	engine.GET("/health", func(c *gin.Context) {
@@ -423,18 +417,59 @@ func recoveryMiddleware(log contracts.Log) gin.HandlerFunc {
 	}
 }
 
-func corsMiddleware(allowOrigins string) gin.HandlerFunc {
+// corsMiddleware CORS 中间件，配置由 http/cors 包共享解析。
+// 多 origin 时逐请求回显命中的 Origin——CORS 规范不允许单个
+// Access-Control-Allow-Origin 头携带多个值；未命中白名单的跨域请求
+// 不输出任何 CORS 头，由浏览器拦截。放行所有源（*）时输出 "*"，
+// 但启用凭据后规范禁止 "*" 搭配凭据，改为回显请求 Origin。
+func corsMiddleware(opts cors.Options) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", allowOrigins)
-		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,PATCH,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin,Content-Type,Accept,Authorization")
-		c.Header("Access-Control-Max-Age", "86400")
-		if allowOrigins != "*" {
-			c.Header("Access-Control-Allow-Credentials", "true")
+		origin := c.GetHeader("Origin")
+		allowOrigin, ok := opts.MatchOrigin(origin)
+		if ok && opts.AllowCredentials {
+			if origin == "" {
+				ok = false
+			} else {
+				allowOrigin = origin
+			}
 		}
+		if ok {
+			h := c.Writer.Header()
+			h.Set("Access-Control-Allow-Origin", allowOrigin)
+			if opts.AllowCredentials {
+				h.Set("Access-Control-Allow-Credentials", "true")
+			}
+			if !opts.Wildcard() {
+				h.Add("Vary", "Origin")
+			}
+			h.Set("Access-Control-Allow-Methods", opts.AllowMethods)
+			h.Set("Access-Control-Allow-Headers", opts.AllowHeaders)
+			if opts.ExposeHeaders != "" {
+				h.Set("Access-Control-Expose-Headers", opts.ExposeHeaders)
+			}
+			if opts.MaxAge > 0 {
+				h.Set("Access-Control-Max-Age", fmt.Sprintf("%d", opts.MaxAge))
+			}
+		}
+
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
+		}
+		c.Next()
+	}
+}
+
+// securityHeadersMiddleware 基础安全响应头中间件（server.security_headers_enabled 开启）。
+// HSTS 仅对 HTTPS 请求输出（HTTP 下无意义）。
+func securityHeadersMiddleware(hstsMaxAge int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h := c.Writer.Header()
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		if hstsMaxAge > 0 && c.Request.TLS != nil {
+			h.Set("Strict-Transport-Security", fmt.Sprintf("max-age=%d", hstsMaxAge))
 		}
 		c.Next()
 	}

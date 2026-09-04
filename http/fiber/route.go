@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/gofiber/fiber/v2/middleware/requestid"
 	"github.com/zhoudm1743/go-fast-framework/contracts"
+	fastcors "github.com/zhoudm1743/go-fast-framework/http/cors"
 )
 
 // route 实现 contracts.Route，封装 Fiber。
@@ -54,25 +56,27 @@ func NewRoute(cfg contracts.Config, validator contracts.Validation, storage cont
 	app.Use(loggerMiddleware(log))
 	app.Use(requestid.New())
 
-	allowOrigins := "*"
-	if originsRaw := cfg.Get("server.cors_allow_origins"); originsRaw != nil {
-		if origins, ok := originsRaw.([]any); ok && len(origins) > 0 {
-			allowOrigins = ""
-			for i, o := range origins {
-				if i > 0 {
-					allowOrigins += ","
-				}
-				allowOrigins += fmt.Sprintf("%v", o)
-			}
-		}
+	// 基础安全响应头中间件（默认关闭，server.security_headers_enabled 开启）
+	if cfg.GetBool("server.security_headers_enabled") {
+		app.Use(securityHeadersMiddleware(fastcors.HSTSMaxAge(cfg)))
 	}
-	app.Use(cors.New(cors.Config{
-		AllowOrigins:     allowOrigins,
-		AllowMethods:     "GET,POST,PUT,DELETE,PATCH,OPTIONS",
-		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
-		AllowCredentials: allowOrigins != "*",
-		MaxAge:           86400,
-	}))
+
+	// CORS 中间件
+	corsOpts := fastcors.Load(cfg)
+	if corsOpts.Wildcard() && corsOpts.AllowCredentials {
+		// fiber 官方 cors 中间件拒绝「放行所有源 + 凭据」组合（直接 panic），
+		// 用自定义实现与 gin 驱动对齐：逐请求回显请求 Origin
+		app.Use(wildcardCredentialsCORSMiddleware(corsOpts))
+	} else {
+		app.Use(cors.New(cors.Config{
+			AllowOrigins:     strings.Join(corsOpts.AllowOrigins, ","),
+			AllowMethods:     corsOpts.AllowMethods,
+			AllowHeaders:     corsOpts.AllowHeaders,
+			ExposeHeaders:    corsOpts.ExposeHeaders,
+			AllowCredentials: corsOpts.AllowCredentials,
+			MaxAge:           corsOpts.MaxAge,
+		}))
+	}
 
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok"})
@@ -368,6 +372,51 @@ func recoveryMiddleware(log contracts.Log) fiber.Handler {
 				err = c.SendStatus(http.StatusInternalServerError)
 			}
 		}()
+		return c.Next()
+	}
+}
+
+// securityHeadersMiddleware 基础安全响应头中间件（server.security_headers_enabled 开启）。
+// HSTS 仅对 HTTPS 请求输出（HTTP 下无意义）。
+func securityHeadersMiddleware(hstsMaxAge int) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		h := &c.Response().Header
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		if hstsMaxAge > 0 && c.Secure() {
+			h.Set("Strict-Transport-Security", fmt.Sprintf("max-age=%d", hstsMaxAge))
+		}
+		return c.Next()
+	}
+}
+
+// wildcardCredentialsCORSMiddleware 处理「放行所有源 + 携带凭据」组合。
+// fiber 官方 cors 中间件拒绝该组合（构造时直接 panic，CORS 规范禁止
+// ACAO:* 搭配凭据），此处与 gin 驱动对齐：逐请求回显请求 Origin。
+func wildcardCredentialsCORSMiddleware(opts fastcors.Options) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		origin := c.Get(fiber.HeaderOrigin)
+		// 无 Origin 头或预检请求缺 Access-Control-Request-Method 时不在 CORS 范畴，
+		// 不输出 CORS 头（避免缓存投毒），直接放行
+		if origin == "" ||
+			(c.Method() == fiber.MethodOptions && c.Get(fiber.HeaderAccessControlRequestMethod) == "") {
+			return c.Next()
+		}
+		h := &c.Response().Header
+		h.Set(fiber.HeaderAccessControlAllowOrigin, origin)
+		h.Set(fiber.HeaderAccessControlAllowCredentials, "true")
+		if c.Method() == fiber.MethodOptions {
+			h.Set(fiber.HeaderAccessControlAllowMethods, opts.AllowMethods)
+			h.Set(fiber.HeaderAccessControlAllowHeaders, opts.AllowHeaders)
+			if opts.MaxAge > 0 {
+				h.Set(fiber.HeaderAccessControlMaxAge, fmt.Sprintf("%d", opts.MaxAge))
+			}
+			return c.SendStatus(fiber.StatusNoContent)
+		}
+		if opts.ExposeHeaders != "" {
+			h.Set(fiber.HeaderAccessControlExposeHeaders, opts.ExposeHeaders)
+		}
 		return c.Next()
 	}
 }
