@@ -410,6 +410,90 @@ app.Register(&gofast_xorm.ServiceProvider{})
 
 再修改配置 `driver: xorm`，业务代码**零改动**。
 
+> **实际落地**：xorm 驱动未按本节规划以独立 module 提供，而是落地为仓库内 `database/drivers/xormdriver/` 包 → 见《6.5 xorm 驱动实现落点（xormdriver）》。
+
+### 6.5 xorm 驱动实现落点（xormdriver）
+
+> 本节为 xorm 驱动的实际实现记录，对应 6.4 节的规划与第十章"暂缓"清单中的 `plugins/gofast-xorm` 项。
+
+#### 实际落点说明
+
+设计文档原规划 xorm 插件为独立 Go module（`plugins/gofast-xorm/`，见「四、目录结构变更」），实际落地为**仓库内包 `database/drivers/xormdriver/`**（包名 `xormdriver`），与 `database/drivers/gormdriver/` 同级同模式。原因：本仓库为单 module 形态，驱动随框架同仓维护，与 gormdriver 保持一致的开发、测试与发版流程（无需 go.work / replace）。
+
+包内文件布局（均为 `database/drivers/xormdriver/` 下）：
+
+| 文件 | 职责 |
+|------|------|
+| `xormdriver.go` | 包注释（语义总纲）；`XormDriver`/`XormQuery` 骨架；schema 表名解析、缓存挂点 |
+| `driver.go` | `NewXormDriver`（engine 创建、表前缀 mapper、日志桥接、连接池、Ping）；`contracts.Driver` 实现；`AutoMigrate` |
+| `service_provider.go` | `ServiceProvider`：启动时调用 `database.RegisterDriver("xorm", factory)` |
+| `cacher.go` | `EnableCaches`（实现 `contracts.QueryCacher`）；缓存 key、失效标签与失效逻辑 |
+| `query_builder.go` / `query_builder_ext.go` | 链式条件构建；软删除、`Schema`/`Cache`/`Lock`/`Raw`/`Debug` 等扩展方法 |
+| `query_read.go` / `query_scan.go` / `query_write.go` / `query_tx.go` | 读/扫描/写/事务终结方法（`XormQuery` 全量实现 `contracts.Query`） |
+| `query_preload.go` | Preload 关联预加载（外键约定 + 反射回填） |
+| `imports.go` | 各引擎底层 `database/sql` 驱动的 blank import |
+| `errors.go` / `logger.go` / `hooks.go` | 错误映射为框架 Sentinel、日志桥接、模型钩子 |
+
+#### 接入方式
+
+xorm 为可选驱动，不随框架默认启用（仅业务显式 import 本包时才引入 xorm 及各数据库驱动依赖）：
+
+```go
+// bootstrap/app.go：挂载 xorm 驱动的 ServiceProvider
+import "github.com/zhoudm1743/go-fast-framework/database/drivers/xormdriver"
+
+app.SetProviders(append(providers, &xormdriver.ServiceProvider{}))
+```
+
+```yaml
+# config/config.yaml
+database:
+  connections:
+    main:
+      driver: xorm      # 启用 xorm 驱动
+      engine: mysql     # mysql | postgres | sqlite | mssql
+      database: gofast
+```
+
+`engine` 与底层 `database/sql` 驱动的对应关系（由 `imports.go` blank import 注册）：
+
+| engine | xorm 驱动名 | 底层驱动 |
+|--------|-------------|----------|
+| `mysql` | `mysql` | go-sql-driver/mysql |
+| `postgres` | `pgx` | jackc/pgx/v5 stdlib |
+| `sqlite`（含 sqlite3） | `sqlite` | glebarez/go-sqlite（纯 Go） |
+| `mssql` | `mssql` | microsoft/go-mssqldb |
+
+高级用户可通过 `XormDriver.RawEngine()` 获取 `*xorm.Engine` 逃生口（不推荐常规使用）。
+
+#### 能力对照（与 gormdriver 的差异）
+
+| 能力 | xormdriver 行为 |
+|------|----------------|
+| `Schema()`/`Tenant()` 多租户 | 显式 `Table()`/`Model()` 永远优先；仅当未显式指定表名时，才按 dest 推导表名并加 `"schema."` 前缀（与 gormdriver `applySchema` 修复后语义一致，投影结构体/分表不会被 dest 推导覆盖）。表前缀（`TablePrefix`）由 PrefixMapper 处理，schema 前缀由查询层执行期拼接 |
+| `Query().Cache()` | 需先经 `dbManager.UseQueryCache` 启用（`XormDriver` 实现 `contracts.QueryCacher`，配置 `database.cache.enabled: true` 时自动调用）；缓存值为 dest 的 JSON 序列化（不可 JSON 序列化的 dest 静默跳过缓存，回源查询）；key 由链式条件片段哈希并绑定 dest 类型；写操作（`Create`/`Save`/`Update`/`Updates`/`Delete`/`FirstOrCreate`/`Exec`/`Restore`/`ForceDelete`）成功后按统一 tag 自动失效；`Row()`/`Rows()` 游标、`FindInBatches`、`Exists` 不缓存 |
+| `Row()` / `Rows()` | 仅支持 `Raw()` 原生 SQL 查询链（gormdriver 还支持链式查询），否则返回错误；直接走 `database/sql` 游标，不经过缓存 |
+| `Preload` | xorm 无关联元数据，由独立实现提供（见 `query_preload.go`）：关联字段须为打 `xorm:"-"` 的导出字段；外键解析 gorm tag（`foreignKey`/`references`，逗号分隔支持复合键）优先，缺省按 `<父表名>_<主键列>` 多列约定；子表批量 IN 查询（非 N+1）后反射回填，支持嵌套路径（`"Orders.Items"`）与 `func(contracts.Query) contracts.Query` 子查询回调；不支持多对多中间表（复杂场景用 `Joins`/`Raw` 自行装配） |
+| `Debug()` | no-op：xorm 无 per-session 调试开关，SQL 日志由引擎级 logger 统一配置（`logger.go` 桥接框架 log 服务与慢查询阈值） |
+| `Lock()` | 仅 `LockForUpdate` 落地（执行期 `session.ForUpdate()` 生成 `FOR UPDATE`）；`LockShareMode` 等 xorm 无对应能力，no-op |
+| `TxOption` | xorm `session.Begin()` 无 `*sql.TxOptions` 参数，隔离级别/只读等选项降级为忽略 |
+| `AutoMigrate` | 映射为 `engine.Sync2`；配置了 Schema 时在事务内 `SET LOCAL search_path` 执行 DDL（PostgreSQL 语义，与 gormdriver 一致） |
+| 错误处理 | 链式方法错误即时记录（gorm `AddError` 语义，终结时优先返回）；终结错误经 `wrapError` 映射为框架 Sentinel Error（`errors.go`），出口与 gormdriver 一致 |
+
+#### 注册机制
+
+`xormdriver.ServiceProvider.Register` 中向框架驱动注册表注册工厂：
+
+```go
+func (sp *ServiceProvider) Register(app foundation.Application) {
+    database.RegisterDriver("xorm", func(cfg database.ConnectionConfig, log contracts.Log) (contracts.Driver, error) {
+        return NewXormDriver(cfg, log)
+    })
+}
+```
+
+注册名 `"xorm"` 与 `XormDriver.DriverName()` 返回值一致。**未挂载 Provider 时**，注册表中无 `"xorm"` 工厂，配置 `driver: "xorm"` 会在连接初始化时报错：`[GoFast] 数据库驱动 "xorm" 未注册（连接 "<连接名>"）`。
+
 ---
 
 ## 七、Facade 变更
