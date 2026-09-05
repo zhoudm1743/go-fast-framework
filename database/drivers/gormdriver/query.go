@@ -103,16 +103,26 @@ func (q *GormQuery) withoutCache() *GormQuery {
 // applySchema 在终结方法（First/Find/Create 等）执行前处理租户 schema。
 // 多租户 schema 已通过 Schema() 动态设置 NamingStrategy.TablePrefix，主表与关联表
 // （Preload/Joins）由 GORM 统一生成租户 schema 前缀，此处仅保留兜底逻辑：
-// 若 NamingStrategy 未生效（如自定义 Namer），且 dest 可解析出不含 "." 的裸表名，
-// 则显式加上 schema 前缀。
+// 若 NamingStrategy 未生效（如模型实现 TableName() 或自定义 Namer）——解析 dest 得到
+// 无 schema 前缀的裸表名——且调用方未显式指定表名，则显式加上 schema 前缀。
 // 注意：不再使用 SET search_path，因为该语句作用于连接 session，会污染连接池
 // （被其他租户复用连接时串 schema），且 SET 与后续查询可能落在不同连接上不可靠。
 func (q *GormQuery) applySchema(dest any) *gorm.DB {
-	if q.schema != "" && dest != nil {
-		stmt := &gorm.Statement{DB: q.db}
-		if err := stmt.Parse(dest); err == nil && stmt.Table != "" && !strings.Contains(stmt.Table, ".") {
-			return q.db.Table(q.schema + "." + stmt.Table)
-		}
+	if q.schema == "" || dest == nil {
+		return q.db
+	}
+	// 调用方已显式 Table()/Model()（schema 模式下驱动已拼好前缀）：
+	// 尊重显式表名，不得按 dest 推导覆盖，否则投影结构体、分表等
+	// dest 推导表名与实际表名不一致的场景会静默查错表。
+	if q.db.Statement.Table != "" || q.db.Statement.TableExpr != nil {
+		return q.db
+	}
+	stmt := &gorm.Statement{DB: q.db}
+	// Statement.Parse 会把带 "schema." 前缀的表名拆分：前缀留在 TableExpr、
+	// Table 裁成裸名，故用 TableExpr == nil 判定 NamingStrategy 未生效（无前缀），
+	// 而非判断 Table 是否含 "."（前缀生效时 Table 恒为裸名，该判定永真）。
+	if err := stmt.Parse(dest); err == nil && stmt.Table != "" && stmt.TableExpr == nil && !strings.Contains(stmt.Table, ".") {
+		return q.db.Table(q.schema + "." + stmt.Table)
 	}
 	return q.db
 }

@@ -317,3 +317,79 @@ func TestPG_FirstOrCreate_Existing(t *testing.T) {
 		t.Errorf("FirstOrCreate 应查到 tenant 已有记录, 实际 name=%q", m.Name)
 	}
 }
+
+// TestPG_ExplicitTableWithProjectionDest 回归缺陷：schema 模式下 applySchema 曾按
+// dest 结构体推导表名无条件覆盖显式 Table()，导致 relation "<schema>.user_rows"
+// does not exist（SQLSTATE 42P01），表恰好存在时静默查错表（缺陷报告 2026-09-05）。
+// 自建 schema：users 存正确数据、user_rows 存诱饵数据，覆盖 Find/First/Create/Delete 路径。
+func TestPG_ExplicitTableWithProjectionDest(t *testing.T) {
+	drv := newPG(t)
+	ten := "tenant_tab_regression"
+
+	if err := drv.Query().Exec("CREATE SCHEMA IF NOT EXISTS " + ten); err != nil {
+		t.Fatalf("CREATE SCHEMA: %v", err)
+	}
+	defer func() {
+		_ = drv.Query().Exec("DROP SCHEMA IF EXISTS " + ten + " CASCADE")
+	}()
+	for _, ddl := range []string{
+		`CREATE TABLE ` + ten + `.users (id text PRIMARY KEY, name text)`,
+		`CREATE TABLE ` + ten + `.user_rows (id text PRIMARY KEY, name text)`,
+		`INSERT INTO ` + ten + `.users VALUES ('u1', 'right-table')`,
+		`INSERT INTO ` + ten + `.user_rows VALUES ('u1', 'wrong-table')`,
+	} {
+		if err := drv.Query().Exec(ddl); err != nil {
+			t.Fatalf("初始化失败 %q: %v", ddl, err)
+		}
+	}
+
+	// userRow 投影 dest：推导表名 user_rows 恰为诱饵表，与显式 Table("users") 不一致
+	type userRow struct {
+		ID   string
+		Name string
+	}
+
+	assertCount := func(table string, want int64) {
+		t.Helper()
+		var n int64
+		if err := drv.Query().Raw("SELECT count(*) FROM " + ten + "." + table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != want {
+			t.Errorf("%s 期望 %d 行, 实际 %d", table, want, n)
+		}
+	}
+
+	// Find：显式 Table 应命中 users 而非 user_rows 诱饵表
+	var rows []userRow
+	if err := drv.Query().Schema(ten).Table("users").
+		Select("id", "name").Where("id = ?", "u1").Find(&rows); err != nil {
+		t.Fatalf("Find: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Name != "right-table" {
+		t.Errorf("Find 应查 users 表, 期望 [right-table], 实际 %+v", rows)
+	}
+
+	// First：同上
+	var one userRow
+	if err := drv.Query().Schema(ten).Table("users").First(&one); err != nil {
+		t.Fatalf("First: %v", err)
+	}
+	if one.Name != "right-table" {
+		t.Errorf("First 应查 users 表, 期望 right-table, 实际 %q", one.Name)
+	}
+
+	// Create：应写入 users，不动 user_rows
+	if err := drv.Query().Schema(ten).Table("users").Create(&userRow{ID: "u2", Name: "created"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	assertCount("users", 2)
+	assertCount("user_rows", 1)
+
+	// Delete：应删 users 的行，不动 user_rows
+	if err := drv.Query().Schema(ten).Table("users").Where("id = ?", "u2").Delete(&userRow{}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	assertCount("users", 1)
+	assertCount("user_rows", 1)
+}
