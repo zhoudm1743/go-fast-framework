@@ -8,6 +8,7 @@ import (
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 
 	"xorm.io/builder"
+	"xorm.io/xorm/names"
 	"xorm.io/xorm/schemas"
 )
 
@@ -118,29 +119,34 @@ func (q *XormQuery) preloadLevel(rows []preloadRow, elemType reflect.Type, segs 
 		return fmt.Errorf("xorm: Preload 子模型 %s 解析失败: %w", childType.Name(), err)
 	}
 
-	// 外键解析：gorm tag 优先，缺省多列约定 <父表名>_<主键列>（含存在性校验）
-	fkCols, refCols, err := resolvePreloadKeys(field, parentTI, childTI)
+	// 外键解析 + 方向判定：外键在子表 → has-one/has-many；在父行 → belongs-to（X-07）
+	fkCols, refCols, belongsTo, err := resolvePreloadKeys(field, parentTI, childTI, isSlice)
 	if err != nil {
 		return err
 	}
-	refFields := make([]string, len(refCols))
-	for i, c := range refCols {
-		refFields[i] = parentTI.GetColumn(c).FieldName
+	// 键角色按方向归位：查询键列（IN）恒在子表；父行取值列与子行分组列取对侧。
+	queryCols, parentCols, childCols := fkCols, refCols, fkCols
+	if belongsTo {
+		queryCols, parentCols, childCols = refCols, fkCols, refCols
 	}
-	fkFields := make([]string, len(fkCols))
-	for i, c := range fkCols {
-		fkFields[i] = childTI.GetColumn(c).FieldName
+	parentKeyCols := make([]*schemas.Column, len(parentCols))
+	for i, c := range parentCols {
+		parentKeyCols[i] = parentTI.GetColumn(c)
+	}
+	childKeyCols := make([]*schemas.Column, len(childCols))
+	for i, c := range childCols {
+		childKeyCols[i] = childTI.GetColumn(c)
 	}
 
 	// 收集父行引用键值（任一引用键零值即跳过该行，其关联字段保持零值）
-	ids := make([]any, 0, len(rows)*len(refFields))
+	ids := make([]any, 0, len(rows)*len(parentCols))
 	indexed := make([]preloadRow, 0, len(rows))
 	for _, row := range rows {
 		rv := reflect.Indirect(reflect.ValueOf(row.ptr))
-		vals := make([]any, 0, len(refFields))
+		vals := make([]any, 0, len(parentCols))
 		zero := false
-		for _, f := range refFields {
-			fv := rv.FieldByName(f)
+		for _, col := range parentKeyCols {
+			fv := structFieldValue(rv, col)
 			if !fv.IsValid() || fv.IsZero() {
 				zero = true
 				break
@@ -167,12 +173,12 @@ func (q *XormQuery) preloadLevel(rows []preloadRow, elemType reflect.Type, segs 
 			cacheCfg: q.cacheCfg,
 		}
 		child = child.Table(q.schemaTable(childTI.Name)).(*XormQuery)
-		if len(fkCols) == 1 {
-			child = child.Where(builder.In(fkCols[0], ids...)).(*XormQuery)
+		if len(queryCols) == 1 {
+			child = child.Where(builder.In(queryCols[0], ids...)).(*XormQuery)
 		} else {
-			ph := "(" + strings.TrimSuffix(strings.Repeat("?, ", len(fkCols)), ", ") + ")"
+			ph := "(" + strings.TrimSuffix(strings.Repeat("?, ", len(queryCols)), ", ") + ")"
 			phs := strings.TrimSuffix(strings.Repeat(ph+", ", len(indexed)), ", ")
-			child = child.Where("("+strings.Join(fkCols, ", ")+") IN ("+phs+")", ids...).(*XormQuery)
+			child = child.Where("("+strings.Join(queryCols, ", ")+") IN ("+phs+")", ids...).(*XormQuery)
 		}
 		if len(spec.conds) > 0 {
 			child = child.Where(spec.conds[0], spec.conds[1:]...).(*XormQuery)
@@ -200,18 +206,28 @@ func (q *XormQuery) preloadLevel(rows []preloadRow, elemType reflect.Type, segs 
 			if dv.Kind() == reflect.Ptr {
 				dv = dv.Elem()
 			}
-			vals := make([]any, 0, len(fkFields))
-			for _, f := range fkFields {
-				vals = append(vals, dv.FieldByName(f).Interface())
+			vals := make([]any, 0, len(childKeyCols))
+			for _, col := range childKeyCols {
+				cv := structFieldValue(dv, col)
+				if !cv.IsValid() {
+					vals = append(vals, nil)
+					continue
+				}
+				vals = append(vals, cv.Interface())
 			}
 			key := preloadJoinKey(vals)
 			groups[key] = append(groups[key], cv)
 		}
 		for _, row := range indexed {
 			rv := reflect.Indirect(reflect.ValueOf(row.ptr))
-			vals := make([]any, 0, len(refFields))
-			for _, f := range refFields {
-				vals = append(vals, rv.FieldByName(f).Interface())
+			vals := make([]any, 0, len(parentKeyCols))
+			for _, col := range parentKeyCols {
+				pv := structFieldValue(rv, col)
+				if !pv.IsValid() {
+					vals = append(vals, nil)
+					continue
+				}
+				vals = append(vals, pv.Interface())
 			}
 			fv := reflect.ValueOf(row.ptr).Elem().FieldByName(seg)
 			group := groups[preloadJoinKey(vals)]
@@ -256,52 +272,75 @@ type preloadRow struct {
 
 // ── 外键解析 ─────────────────────────────────────────────────────────
 
-// resolvePreloadKeys 解析父键列（refCols）与子表外键列（fkCols），均为数据库列名。
-// 关联字段的 gorm tag（foreignKey/references，字段名逗号分隔、复合键支持）优先：
-// foreignKey 值为子模型字段名，references 值为父模型字段名，缺省 references
-// 回退父表主键、缺省 foreignKey 回退多列约定。无 tag 时整体回退多列约定：
-// 父表每个主键列对应子表 <父表名>_<主键列> 外键列（单列主键 id 即 <父表名>_id）。
-// 引用/外键列逐一校验存在，失败返回 ErrUnsupported 包装错误。
-func resolvePreloadKeys(field reflect.StructField, parentTI, childTI *schemas.Table) (fkCols, refCols []string, err error) {
-	fkNames, refNames, hasTag := gormAssocKeys(field.Tag.Get("gorm"))
-	if hasTag {
+// resolvePreloadKeys 解析关联键并判定方向，返回外键列（fkCols）、引用键列
+// （refCols，均为数据库列名）与 belongsTo 方向标记：
+//   - has-one/has-many（belongsTo=false）：外键在子表，父行持有引用键；
+//   - belongs-to（belongsTo=true，X-07）：父行持有外键，子表为被引用表
+//     （如 Worker.Dept *Dept + foreignKey:DeptID，外键 dept_id 在 workers 行上）。
+//
+// 方向判定：按"外键列在子表还是父行"的两侧存在性探测，切片字段优先探测
+// has-many、单 struct 字段优先探测 belongs-to（与 gorm 的关联推断一致）。
+// gorm tag（foreignKey/references，字段名逗号分隔、复合键支持）参与候选；
+// 缺省 references 回退引用表主键，缺省 foreignKey 回退 <引用表名>_<引用列>
+// （has 系）或 <关联字段名蛇形>_<引用列>（belongs-to，如 Dept+id → dept_id）。
+// 两个方向都无法成立时返回 ErrUnsupported 包装错误。
+func resolvePreloadKeys(field reflect.StructField, parentTI, childTI *schemas.Table, isSlice bool) (fkCols, refCols []string, belongsTo bool, err error) {
+	fkNames, refNames, _ := gormAssocKeys(field.Tag.Get("gorm"))
+
+	type keyCandidate struct {
+		belongsTo bool
+		fkTable   *schemas.Table // 外键所在表
+		refTable  *schemas.Table // 引用键所在表
+		defaultFk func(rc string) string
+	}
+	snake := names.SnakeMapper{}.Obj2Table
+	candidates := []keyCandidate{
+		{false, childTI, parentTI, func(rc string) string { return parentTI.Name + "_" + rc }},
+		{true, parentTI, childTI, func(rc string) string { return snake(field.Name) + "_" + rc }},
+	}
+	// 方向探测顺序对齐 gorm 推断：切片 → has-many 优先；单 struct → belongs-to 优先
+	if !isSlice {
+		candidates[0], candidates[1] = candidates[1], candidates[0]
+	}
+
+	for _, cand := range candidates {
+		var rc, fc []string
+		var perr error
 		if refNames != "" {
-			if refCols, err = fieldNamesToColumns(parentTI, refNames); err != nil {
-				return nil, nil, fmt.Errorf("%w: Preload 字段 %q gorm references 解析失败: %v", contracts.ErrUnsupported, field.Name, err)
+			if rc, perr = fieldNamesToColumns(cand.refTable, refNames); perr != nil {
+				continue // 该方向无 references 字段，尝试另一方向
 			}
 		} else {
-			refCols = append([]string(nil), parentTI.PrimaryKeys...)
+			rc = append([]string(nil), cand.refTable.PrimaryKeys...)
+		}
+		if len(rc) == 0 {
+			continue
 		}
 		if fkNames != "" {
-			if fkCols, err = fieldNamesToColumns(childTI, fkNames); err != nil {
-				return nil, nil, fmt.Errorf("%w: Preload 字段 %q gorm foreignKey 解析失败: %v", contracts.ErrUnsupported, field.Name, err)
+			if fc, perr = fieldNamesToColumns(cand.fkTable, fkNames); perr != nil {
+				continue // 该方向无 foreignKey 字段，尝试另一方向
 			}
 		} else {
-			for _, rc := range refCols {
-				fkCols = append(fkCols, parentTI.Name+"_"+rc)
+			for _, r := range rc {
+				fc = append(fc, cand.defaultFk(r))
 			}
 		}
-	} else {
-		refCols = append([]string(nil), parentTI.PrimaryKeys...)
-		for _, rc := range refCols {
-			fkCols = append(fkCols, parentTI.Name+"_"+rc)
+		if len(fc) == 0 || len(fc) != len(rc) {
+			continue
 		}
-	}
-	if len(refCols) == 0 || len(fkCols) == 0 {
-		return nil, nil, fmt.Errorf("%w: Preload 字段 %q 父表 %q 无主键可关联，请改用 Joins", contracts.ErrUnsupported, field.Name, parentTI.Name)
-	}
-	if len(fkCols) != len(refCols) {
-		return nil, nil, fmt.Errorf("%w: Preload 字段 %q 外键列数（%d）与引用键列数（%d）不一致", contracts.ErrUnsupported, field.Name, len(fkCols), len(refCols))
-	}
-	for i, c := range fkCols {
-		if childTI.GetColumn(c) == nil {
-			return nil, nil, fmt.Errorf("%w: Preload 字段 %q 子表 %q 缺少外键列 %q，请改用 Joins", contracts.ErrUnsupported, field.Name, childTI.Name, c)
+		valid := true
+		for i, c := range fc {
+			if cand.fkTable.GetColumn(c) == nil || cand.refTable.GetColumn(rc[i]) == nil {
+				valid = false
+				break
+			}
 		}
-		if parentTI.GetColumn(refCols[i]) == nil {
-			return nil, nil, fmt.Errorf("%w: Preload 字段 %q 父表 %q 缺少引用列 %q", contracts.ErrUnsupported, field.Name, parentTI.Name, refCols[i])
+		if !valid {
+			continue
 		}
+		return fc, rc, cand.belongsTo, nil
 	}
-	return fkCols, refCols, nil
+	return nil, nil, false, fmt.Errorf("%w: Preload 字段 %q 无法在子表 %q / 父表 %q 间解析关联键与方向（可显式 gorm foreignKey/references 或改用 Joins）", contracts.ErrUnsupported, field.Name, childTI.Name, parentTI.Name)
 }
 
 // gormAssocKeys 解析 gorm association tag 中的 foreignKey/references 字段名

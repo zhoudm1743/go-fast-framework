@@ -73,9 +73,20 @@ func NewXormDriver(cfg contracts.ConnectionConfig, log contracts.Log) (*XormDriv
 	if cfg.TablePrefix != "" {
 		engine.SetTableMapper(names.NewPrefixMapper(names.SnakeMapper{}, cfg.TablePrefix))
 	}
+	// 列名映射（X-02）：默认 GonicMapper（xorm 原生，常用缩写不加下划线，
+	// DeptID→dept_id、ID→id，与 GORM NamingStrategy 同一套缩写规则），保证
+	// 同一模型在 gorm/xorm 两驱动下列名一致；表名仍为 SnakeMapper 单数。
+	// naming: "snake" 回退 SnakeMapper 逐字下划线行为（DeptID→dept_i_d）。
+	if cfg.Naming != "snake" {
+		engine.SetColumnMapper(names.GonicMapper{})
+	}
 
 	// 桥接框架日志器：SQL 执行日志、慢查询与 xorm 内部日志统一走框架日志器，
 	// 保证与其他驱动（gormdriver）的日志级别、输出目标一致。
+	// nil 防护：作为公开 API 允许传 nil log（X-09），降级为丢弃输出的空实现。
+	if log == nil {
+		log = discardLog{}
+	}
 	engine.SetLogger(newFastLogger(log, cfg.LogLevel, time.Duration(cfg.SlowThreshold)*time.Millisecond))
 
 	// 配置连接池（engine.DB() 内嵌 *sql.DB，单值返回，无 error）。

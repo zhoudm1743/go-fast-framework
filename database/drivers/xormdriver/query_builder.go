@@ -2,6 +2,8 @@ package xormdriver
 
 import (
 	"fmt"
+	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
@@ -150,9 +152,11 @@ func (q *XormQuery) Order(value any) contracts.Query {
 	if !ok {
 		return q.setErr(fmt.Errorf("%w: Order 仅支持 string，收到 %T", contracts.ErrUnsupported, value))
 	}
-	return q.addApplier("order:"+order, func(q *XormQuery, s *xorm.Session) error {
-		s.OrderBy(order)
-		return nil
+	// 不落 applier 而记录到 orderStr：由 build 末段统一应用，Count 才能整体
+	// 剥离 ORDER BY（对齐 gorm Count 语义，见 X-06）。
+	return q.wrap(func(c *XormQuery) {
+		c.orderStr = order
+		c.keyParts = append(c.keyParts, "order:"+order)
 	})
 }
 
@@ -232,6 +236,10 @@ func (q *XormQuery) Distinct(args ...any) contracts.Query {
 func applyCondToSession(s *xorm.Session, mode condMode, query any, args []any) error {
 	switch cond := query.(type) {
 	case string:
+		// gorm 语义兼容：IN ?/IN (?) 的切片参数展开为 IN (?,?,...)（X-05）。
+		// gormdriver 下 Where("id IN ?", ids) 自动展开；xorm 原样绑定单参数会在
+		// PG 生成 "IN $1" 语法错误或 pgx 无法编码切片，必须在驱动层对齐展开。
+		cond, args = expandSlicePlaceholders(cond, args)
 		switch mode {
 		case condOr:
 			s.Or(cond, args...)
@@ -262,4 +270,64 @@ func applyCondToSession(s *xorm.Session, mode condMode, query any, args []any) e
 		return fmt.Errorf("%w: 不支持的条件类型 %T", contracts.ErrUnsupported, query)
 	}
 	return nil
+}
+
+// ── IN 切片参数展开（gorm 语义对齐）──────────────────────────────────
+
+// inPlaceholderRe 匹配 SQL 条件串中的 IN 占位符两种写法：`IN ?` 与 `IN (?)`
+// （大小写不敏感；NOT IN / not in 同样命中——词边界保证不误伤含 in 的标识符）。
+var inPlaceholderRe = regexp.MustCompile(`(?i)\bin\s*(\(\s*\?\s*\)|\?)`)
+
+// expandSlicePlaceholders 将条件串中绑定到切片参数的 IN 占位符展开为
+// IN (?,?,...) 并平铺参数，对齐 gormdriver 对 Where("id IN ?", ids) 的语义。
+// 规则：
+//   - 切片参数（不含 []byte——它是单个二进制值）→ 按元素展开；
+//   - 空切片 → IN (NULL)（恒假，与 gorm 生成的 SQL 一致），不产生绑定参数；
+//   - 非切片参数保留原占位符形态原样透传。
+func expandSlicePlaceholders(cond string, args []any) (string, []any) {
+	if len(args) == 0 {
+		return cond, args
+	}
+	var out strings.Builder
+	out.Grow(len(cond) + 16)
+	flat := make([]any, 0, len(args))
+	argIdx := 0
+	last := 0
+	for _, loc := range inPlaceholderRe.FindAllStringSubmatchIndex(cond, -1) {
+		out.WriteString(cond[last:loc[0]])
+		if argIdx >= len(args) {
+			// 占位符多于参数：原样保留，交给 xorm 报参数缺失
+			out.WriteString(cond[loc[0]:loc[1]])
+			last = loc[1]
+			continue
+		}
+		v := args[argIdx]
+		argIdx++
+		rv := reflect.ValueOf(v)
+		if v != nil && rv.Kind() != reflect.String &&
+			(rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) &&
+			rv.Type().Elem().Kind() != reflect.Uint8 {
+			if n := rv.Len(); n == 0 {
+				out.WriteString("IN (NULL)")
+			} else {
+				out.WriteString("IN (")
+				for i := 0; i < n; i++ {
+					if i > 0 {
+						out.WriteString(",")
+					}
+					out.WriteString("?")
+					flat = append(flat, rv.Index(i).Interface())
+				}
+				out.WriteString(")")
+			}
+			last = loc[1]
+			continue
+		}
+		out.WriteString(cond[loc[0]:loc[1]])
+		flat = append(flat, v)
+		last = loc[1]
+	}
+	out.WriteString(cond[last:])
+	flat = append(flat, args[argIdx:]...)
+	return out.String(), flat
 }

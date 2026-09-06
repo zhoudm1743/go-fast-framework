@@ -9,7 +9,7 @@ import (
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 )
 
-const Version = "0.8.0"
+const Version = "0.8.1"
 
 // Application 应用实例接口，嵌入 Container。
 type Application interface {
@@ -73,7 +73,7 @@ type application struct {
 	*container
 	basePath      string
 	providers     []ServiceProvider
-	booted        atomic.Bool        // 原子操作保证并发安全的引导状态
+	booted        atomic.Bool // 原子操作保证并发安全的引导状态
 	shutdownHooks []func()
 	mu            sync.Mutex
 	deferredMap   map[string]*deferredEntry // service key → deferred entry
@@ -320,7 +320,6 @@ func (a *application) Log() contracts.Log {
 func (a *application) Cache() contracts.Cache {
 	return a.MustMake("cache").(contracts.Cache)
 }
-
 
 func (a *application) DB() contracts.DB {
 	return a.MustMake("db").(contracts.DB)

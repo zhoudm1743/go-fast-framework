@@ -61,6 +61,7 @@ type XormQuery struct {
 	modelValue    any                    // Model() 记录的 bean
 	limitN        int                    // LIMIT，<=0 表示未设置
 	startN        int                    // OFFSET，<=0 表示未设置
+	orderStr      string                 // ORDER BY 子句，build 末段统一应用（Count 可剥离）
 	err           error                  // 链上首个错误（gorm AddError 语义），终结时优先返回
 	cacheCfg      *contracts.CacheConfig // Cache() 设置；nil 表示本查询不走缓存
 	qc            *queryCache            // 驱动级缓存（未 EnableCaches 时为 nil）
@@ -117,6 +118,12 @@ func (q *XormQuery) clone() *XormQuery {
 // build 构建（或复用事务）session，按序应用上下文、表名兜底、分页与链式条件。
 // dest 用于表名兜底推导；无 dest 的场景传 nil。
 func (q *XormQuery) build(dest any) (*xorm.Session, error) {
+	return q.buildOpts(dest, false)
+}
+
+// buildOpts 同 build；skipOrder 用于 Count 剥离 ORDER BY——聚合列不在排序列
+// 集合内时 PG 严格模式报 42803，且 gorm Count 本就丢弃排序（X-06）。
+func (q *XormQuery) buildOpts(dest any, skipOrder bool) (*xorm.Session, error) {
 	if q.err != nil {
 		return nil, q.err
 	}
@@ -141,6 +148,9 @@ func (q *XormQuery) build(dest any) (*xorm.Session, error) {
 		if err := ap(q, s); err != nil {
 			return nil, err
 		}
+	}
+	if !skipOrder && q.orderStr != "" {
+		s.OrderBy(q.orderStr)
 	}
 	return s, nil
 }

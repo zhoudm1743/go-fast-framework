@@ -34,6 +34,12 @@ type ConnectionConfig struct {
 	// ── 表前缀 ──────────────────────────────────────────────
 	TablePrefix string `mapstructure:"table_prefix"`
 
+	// ── 列名映射策略（仅 xorm 驱动）──────────────────────────
+	// gonic（默认）：xorm 原生 GonicMapper（常用缩写不加下划线，
+	// DeptID→dept_id、ID→id，与 GORM NamingStrategy 同一套缩写规则）；
+	// snake：xorm 原生 SnakeMapper（DeptID→dept_i_d，v0.8.0 行为）。
+	Naming string `mapstructure:"naming"`
+
 	// ── 连接池 ──────────────────────────────────────────────
 	MaxIdleConns    int `mapstructure:"max_idle_conns"`     // 默认 10
 	MaxOpenConns    int `mapstructure:"max_open_conns"`     // 默认 100

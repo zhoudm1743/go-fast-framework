@@ -39,9 +39,13 @@ func (m *Model) BeforeCreate(tx *gorm.DB) error {
 }
 
 // ModelWithSoftDelete 带软删除的基础模型。
+// xorm 驱动注意：内部嵌入已自带 xorm:"extends"（X-01），业务模型只需在
+// ModelWithSoftDelete 嵌入字段上加一次 xorm:"extends" 即可完整展开为
+// id/created_at/updated_at/deleted_at 列；直接双嵌入 Model + SoftDelete
+// 的模型则两处各加一次。
 type ModelWithSoftDelete struct {
-	Model
-	SoftDelete
+	Model      `xorm:"extends"`
+	SoftDelete `xorm:"extends"`
 }
 
 // ── 模型钩子接口别名（向后兼容，实际定义在 contracts 包）─────────────

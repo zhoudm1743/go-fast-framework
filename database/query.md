@@ -473,7 +473,11 @@ database:
 | `Schema()`/`Tenant()` 多租户 | 显式 `Table()`/`Model()` 永远优先；仅当未显式指定表名时，才按 dest 推导表名并加 `"schema."` 前缀（与 gormdriver `applySchema` 修复后语义一致，投影结构体/分表不会被 dest 推导覆盖）。表前缀（`TablePrefix`）由 PrefixMapper 处理，schema 前缀由查询层执行期拼接 |
 | `Query().Cache()` | 需先经 `dbManager.UseQueryCache` 启用（`XormDriver` 实现 `contracts.QueryCacher`，配置 `database.cache.enabled: true` 时自动调用）；缓存值为 dest 的 JSON 序列化（不可 JSON 序列化的 dest 静默跳过缓存，回源查询）；key 由链式条件片段哈希并绑定 dest 类型；写操作（`Create`/`Save`/`Update`/`Updates`/`Delete`/`FirstOrCreate`/`Exec`/`Restore`/`ForceDelete`）成功后按统一 tag 自动失效；`Row()`/`Rows()` 游标、`FindInBatches`、`Exists` 不缓存 |
 | `Row()` / `Rows()` | 仅支持 `Raw()` 原生 SQL 查询链（gormdriver 还支持链式查询），否则返回错误；直接走 `database/sql` 游标，不经过缓存 |
-| `Preload` | xorm 无关联元数据，由独立实现提供（见 `query_preload.go`）：关联字段须为打 `xorm:"-"` 的导出字段；外键解析 gorm tag（`foreignKey`/`references`，逗号分隔支持复合键）优先，缺省按 `<父表名>_<主键列>` 多列约定；子表批量 IN 查询（非 N+1）后反射回填，支持嵌套路径（`"Orders.Items"`）与 `func(contracts.Query) contracts.Query` 子查询回调；不支持多对多中间表（复杂场景用 `Joins`/`Raw` 自行装配） |
+| `Preload` | xorm 无关联元数据，由独立实现提供（见 `query_preload.go`）：关联字段须为打 `xorm:"-"` 的导出字段；外键解析 gorm tag（`foreignKey`/`references`，逗号分隔支持复合键）优先，缺省按 `<父表名>_<主键列>` 多列约定；**0.8.1 起支持 belongs-to 方向自动判定**（`Worker.Dept *Dept` + `foreignKey:DeptID`，外键在父行上，按外键列在子表/父行的存在性探测方向）；子表批量 IN 查询（非 N+1）后反射回填，支持嵌套路径（`"Orders.Items"`）与 `func(contracts.Query) contracts.Query` 子查询回调；不支持多对多中间表（复杂场景用 `Joins`/`Raw` 自行装配） |
+| `Where("id IN ?", 切片)` | **0.8.1 起对齐 gorm 语义**：`IN ?`/`IN (?)` 绑定切片参数时自动展开为 `IN (?,?,...)` 并平铺参数；空切片展开为 `IN (NULL)`（恒假）；`NOT IN ?` 同样生效 |
+| `Count` | **0.8.1 起剥离链上 ORDER BY**（对齐 gorm Count）：聚合列不在排序列集合内时 PG 严格模式不再报 42803 |
+| `Save` | **0.8.1 起对齐 gorm upsert 语义**：主键非零更新命中 0 行时回落 INSERT；嵌入 `database.Model` 的模型主键经 `FieldIndex` 定位（兼容 `extends` 嵌入路径） |
+| 列名映射 | **0.8.1 起默认 `names.GonicMapper`**（xorm 原生，常用缩写不加下划线：`DeptID→dept_id`、`ID→id`、`PID→pid`），与 gormdriver 派生列名一致；`naming: "snake"` 配置回退 SnakeMapper（v0.8.0 行为，`DeptID→dept_i_d`）。表名仍为 SnakeMapper 单数 + TablePrefix |
 | `Debug()` | no-op：xorm 无 per-session 调试开关，SQL 日志由引擎级 logger 统一配置（`logger.go` 桥接框架 log 服务与慢查询阈值） |
 | `Lock()` | 仅 `LockForUpdate` 落地（执行期 `session.ForUpdate()` 生成 `FOR UPDATE`）；`LockShareMode` 等 xorm 无对应能力，no-op |
 | `TxOption` | xorm `session.Begin()` 无 `*sql.TxOptions` 参数，隔离级别/只读等选项降级为忽略 |
@@ -493,6 +497,21 @@ func (sp *ServiceProvider) Register(app foundation.Application) {
 ```
 
 注册名 `"xorm"` 与 `XormDriver.DriverName()` 返回值一致。**未挂载 Provider 时**，注册表中无 `"xorm"` 工厂，配置 `driver: "xorm"` 会在连接初始化时报错：`[GoFast] 数据库驱动 "xorm" 未注册（连接 "<连接名>"）`。
+
+#### 嵌入模型（extends）与引擎差异备忘
+
+- **嵌入 `database.Model` / `SoftDelete`**：xorm 对匿名嵌入不自动展开，业务模型须在嵌入字段显式标注 `xorm:"extends"`：
+
+  ```go
+  type Order struct {
+      database.Model `xorm:"extends"`
+      OrderNo        string `xorm:"varchar(32) 'order_no'"`
+  }
+  ```
+
+  `database.ModelWithSoftDelete` 内部嵌入已自带 extends（0.8.1 起），业务侧只需一个 tag。`Save`/`Preload` 的主键与外键定位均按 `FieldIndex` 解析，extends 嵌入路径安全。
+- **Update RowsAffected 引擎差异**（xorm FAQ）：SQLite 返回"符合条件的行数"，MySQL/PostgreSQL 返回"实际改变的行数"；跨引擎比较 `RowsAffected` 时需注意。
+- **bool/零值字段更新**：xorm 对 struct 更新默认跳过零值字段（与 gorm 一致）；需要写入 bool/零值时用 map 形态 `Updates(map[string]any{...})`（map 键无条件写入）。
 
 ---
 

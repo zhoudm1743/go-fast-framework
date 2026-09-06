@@ -45,7 +45,6 @@ type ConfigProvider interface {
 	ConfigDefaults() map[string]any
 }
 
-
 // DBMigrator 可选接口：声明需要自动迁移的数据库模型。
 //
 // 框架在所有 Provider Boot 完成后、且 "db" 服务可用时，自动调用 MigrateDB。

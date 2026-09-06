@@ -161,11 +161,16 @@ func (q *XormQuery) saveOne(value any) (int64, error) {
 	if err != nil {
 		return 0, q.done(err)
 	}
+	// gorm Save 语义：更新命中 0 行（行不存在）回落 INSERT（X-04 upsert）。
+	// licence 菜单同步等 upsert 场景依赖该语义；行已存在时不会走到这里。
+	if n == 0 {
+		return q.createCore(value)
+	}
 	q.invalidateCache()
 	return n, q.done(invokeAfterUpdate(q, value))
 }
 
-// Save 保存记录：主键全零按插入处理，否则按主键更新。
+// Save 保存记录：主键全零按插入处理，否则按主键更新（0 行回落插入，gorm 语义）。
 func (q *XormQuery) Save(value any) error {
 	_, err := q.save(value)
 	return err
@@ -313,14 +318,17 @@ func pkAllZero(e *xorm.Engine, value any) bool {
 
 // pkStructZero 判定单个 struct 值的主键字段是否全为零值。
 // xorm 的 PrimaryKeys 存放 mapper 映射后的数据库列名（如字段 ID → 列 id），
-// 不能直接用列名查 struct 字段，须经 schemas.Table 列的 FieldName 定位。
+// 不能直接用列名查 struct 字段，须经 schemas.Table 列定位。
+// 定位用 FieldIndex 而非 FieldName：extends 展开后 FieldName 带嵌入前缀
+// （如 "Model.ID"），reflect.FieldByName 不支持点分路径会恒判零值，
+// 使 Save 误走 INSERT 报主键冲突（X-03）。
 func pkStructZero(t *schemas.Table, rv reflect.Value) bool {
 	for _, name := range t.PrimaryKeys {
 		col := t.GetColumn(name)
-		if col == nil || col.FieldName == "" {
+		if col == nil {
 			continue
 		}
-		fv := rv.FieldByName(col.FieldName)
+		fv := structFieldValue(rv, col)
 		// 字段不可定位（如内嵌指针为 nil 得到零 Value）时按零值处理：
 		// 宁走插入路径拿到重复键错误，也不走无主键条件的全表更新。
 		if fv.IsValid() && !fv.IsZero() {
@@ -328,6 +336,32 @@ func pkStructZero(t *schemas.Table, rv reflect.Value) bool {
 		}
 	}
 	return true
+}
+
+// structFieldValue 按列定义定位 struct 字段值。
+// 优先 FieldIndex（FieldByIndex 语义，天然支持 extends 嵌入路径），
+// 逐级校验指针/结构有效性；FieldIndex 缺失时回落 FieldName。
+func structFieldValue(rv reflect.Value, col *schemas.Column) reflect.Value {
+	if len(col.FieldIndex) > 0 {
+		cur := rv
+		for _, idx := range col.FieldIndex {
+			if cur.Kind() == reflect.Ptr {
+				if cur.IsNil() {
+					return reflect.Value{}
+				}
+				cur = cur.Elem()
+			}
+			if cur.Kind() != reflect.Struct {
+				return reflect.Value{}
+			}
+			cur = cur.Field(idx)
+		}
+		return cur
+	}
+	if col.FieldName != "" {
+		return rv.FieldByName(col.FieldName)
+	}
+	return reflect.Value{}
 }
 
 // ── 主键条件构造（Save 更新路径用）─────────────────────────────────────
@@ -350,7 +384,8 @@ func applyPKCondition(s *xorm.Session, e *xorm.Engine, value any) error {
 		if c == nil {
 			return fmt.Errorf("xorm: 主键列 %q 无法定位", col)
 		}
-		fv := rv.FieldByName(c.FieldName)
+		// FieldIndex 定位：兼容 extends 嵌入（FieldName 带前缀，见 X-03）
+		fv := structFieldValue(rv, c)
 		if !fv.IsValid() {
 			return fmt.Errorf("xorm: 主键列 %q 对应字段 %q 不存在", col, c.FieldName)
 		}

@@ -1,6 +1,7 @@
 package xormdriver
 
 import (
+	"context"
 	"time"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
@@ -96,3 +97,26 @@ func (f *fastLogger) ShowSQL(show ...bool) {
 
 // IsShowSQL 返回 SQL 日志开关。
 func (f *fastLogger) IsShowSQL() bool { return f.showSQL }
+
+// ── 空日志实现（NewXormDriver nil log 降级用，X-09）───────────────────
+
+// discardLog 丢弃全部输出的 contracts.Log 空实现，With 系返回自身。
+type discardLog struct{}
+
+func (discardLog) Debug(args ...any)                 {}
+func (discardLog) Debugf(format string, args ...any) {}
+func (discardLog) Info(args ...any)                  {}
+func (discardLog) Infof(format string, args ...any)  {}
+func (discardLog) Warn(args ...any)                  {}
+func (discardLog) Warnf(format string, args ...any)  {}
+func (discardLog) Error(args ...any)                 {}
+func (discardLog) Errorf(format string, args ...any) {}
+func (discardLog) Fatal(args ...any)                 {}
+func (discardLog) Fatalf(format string, args ...any) {}
+func (discardLog) Panic(args ...any)                 {}
+func (discardLog) Panicf(format string, args ...any) {}
+
+func (l discardLog) WithField(string, any) contracts.Log       { return l }
+func (l discardLog) WithFields(map[string]any) contracts.Log   { return l }
+func (l discardLog) WithError(error) contracts.Log             { return l }
+func (l discardLog) WithContext(context.Context) contracts.Log { return l }

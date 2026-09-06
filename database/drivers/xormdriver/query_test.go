@@ -354,25 +354,30 @@ func TestXormSaveResultRowsAffected(t *testing.T) {
 		t.Errorf("SaveResult 更新命中 RowsAffected 期望 1, 实际 %d", res.RowsAffected)
 	}
 
-	// 更新路径未命中（主键非零但库中无此行）：保持纯更新语义，IsZeroRow 判定
+	// 更新路径未命中（主键非零但库中无此行）：对齐 gorm Save 的 upsert 语义
+	// （X-04，0.8.1 起）：0 行回落 INSERT，RowsAffected=1 且新行落库
 	res = q.SaveResult(&XormTestModel{ID: "ghost", Name: "nowhere"})
 	if res.Error != nil {
-		t.Fatalf("SaveResult 未命中不应返回错误: %v", res.Error)
+		t.Fatalf("SaveResult 未命中回落插入不应报错: %v", res.Error)
 	}
-	if res.RowsAffected != 0 {
-		t.Errorf("SaveResult 未命中 RowsAffected 期望 0, 实际 %d", res.RowsAffected)
-	}
-	if !res.IsZeroRow() {
-		t.Error("SaveResult 未命中应判为零行")
+	if res.RowsAffected != 1 {
+		t.Errorf("SaveResult 未命中回落插入 RowsAffected 期望 1, 实际 %d", res.RowsAffected)
 	}
 
-	// 未命中不回落插入（与 gorm 的 upsert 退路不同，纯更新语义）
+	// 回落插入的行真实存在（upsert 生效）
 	var n int64
 	if err := q.Model(&XormTestModel{}).Count(&n); err != nil {
 		t.Fatalf("Count 失败: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("未命中 Save 不应插入新行, 期望 2 行, 实际 %d", n)
+	if n != 3 {
+		t.Errorf("未命中 Save 应回落插入新行, 期望 3 行, 实际 %d", n)
+	}
+	var ghost XormTestModel
+	if err := q.First(&ghost, "id = ?", "ghost"); err != nil {
+		t.Fatalf("回落插入的行应可查询: %v", err)
+	}
+	if ghost.Name != "nowhere" {
+		t.Errorf("回落插入行内容不符, 期望 nowhere, 实际 %q", ghost.Name)
 	}
 }
 
