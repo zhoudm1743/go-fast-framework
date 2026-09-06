@@ -40,6 +40,11 @@ type ConnectionConfig struct {
 	// snake：xorm 原生 SnakeMapper（DeptID→dept_i_d，v0.8.0 行为）。
 	Naming string `mapstructure:"naming"`
 
+	// TagIdentifier xorm 驱动读取的 struct tag 键名。
+	// 默认 "xorm"（向后兼容）；置 "orm" 启用统一模型标签。
+	// 注意：引擎级全局生效，切换后该连接所有模型的 xorm:"..." tag 失效。
+	TagIdentifier string `mapstructure:"tag_identifier"`
+
 	// ── 连接池 ──────────────────────────────────────────────
 	MaxIdleConns    int `mapstructure:"max_idle_conns"`     // 默认 10
 	MaxOpenConns    int `mapstructure:"max_open_conns"`     // 默认 100
