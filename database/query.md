@@ -410,39 +410,32 @@ app.Register(&gofast_xorm.ServiceProvider{})
 
 再修改配置 `driver: xorm`，业务代码**零改动**。
 
-> **实际落地**：xorm 驱动未按本节规划以独立 module 提供，而是落地为仓库内 `database/drivers/xormdriver/` 包 → 见《6.5 xorm 驱动实现落点（xormdriver）》。
+> **实际落地（已拆仓）**：gorm / xorm 驱动已拆为独立 Go module：
+> - [`github.com/zhoudm1743/gofast-gorm`](https://github.com/zhoudm1743/gofast-gorm)（包名 `gormdriver`）
+> - [`github.com/zhoudm1743/gofast-xorm`](https://github.com/zhoudm1743/gofast-xorm)（包名 `xormdriver`）
+>
+> 框架 `database.ServiceProvider` 不再自动注册任何 ORM；业务须显式加入对应插件的 `ServiceProvider`。
 
 ### 6.5 xorm 驱动实现落点（xormdriver）
 
-> 本节为 xorm 驱动的实际实现记录，对应 6.4 节的规划与第十章"暂缓"清单中的 `plugins/gofast-xorm` 项。
+> 本节为 xorm 驱动的实现记录。驱动源码位于独立仓库 `gofast-xorm`。
 
-#### 实际落点说明
+#### 落点说明
 
-设计文档原规划 xorm 插件为独立 Go module（`plugins/gofast-xorm/`，见「四、目录结构变更」），实际落地为**仓库内包 `database/drivers/xormdriver/`**（包名 `xormdriver`），与 `database/drivers/gormdriver/` 同级同模式。原因：本仓库为单 module 形态，驱动随框架同仓维护，与 gormdriver 保持一致的开发、测试与发版流程（无需 go.work / replace）。
-
-包内文件布局（均为 `database/drivers/xormdriver/` 下）：
-
-| 文件 | 职责 |
-|------|------|
-| `xormdriver.go` | 包注释（语义总纲）；`XormDriver`/`XormQuery` 骨架；schema 表名解析、缓存挂点 |
-| `driver.go` | `NewXormDriver`（engine 创建、表前缀 mapper、日志桥接、连接池、Ping）；`contracts.Driver` 实现；`AutoMigrate` |
-| `service_provider.go` | `ServiceProvider`：启动时调用 `database.RegisterDriver("xorm", factory)` |
-| `cacher.go` | `EnableCaches`（实现 `contracts.QueryCacher`）；缓存 key、失效标签与失效逻辑 |
-| `query_builder.go` / `query_builder_ext.go` | 链式条件构建；软删除、`Schema`/`Cache`/`Lock`/`Raw`/`Debug` 等扩展方法 |
-| `query_read.go` / `query_scan.go` / `query_write.go` / `query_tx.go` | 读/扫描/写/事务终结方法（`XormQuery` 全量实现 `contracts.Query`） |
-| `query_preload.go` | Preload 关联预加载（外键约定 + 反射回填） |
-| `imports.go` | 各引擎底层 `database/sql` 驱动的 blank import |
-| `errors.go` / `logger.go` / `hooks.go` | 错误映射为框架 Sentinel、日志桥接、模型钩子 |
+设计文档原规划 xorm 插件为独立 Go module（`plugins/gofast-xorm/`），现已发布为 [`github.com/zhoudm1743/gofast-xorm`](https://github.com/zhoudm1743/gofast-xorm)。gorm 同步拆出为 [`github.com/zhoudm1743/gofast-gorm`](https://github.com/zhoudm1743/gofast-gorm)。
 
 #### 接入方式
 
-xorm 为可选驱动，不随框架默认启用（仅业务显式 import 本包时才引入 xorm 及各数据库驱动依赖）：
-
 ```go
-// bootstrap/app.go：挂载 xorm 驱动的 ServiceProvider
-import "github.com/zhoudm1743/go-fast-framework/database/drivers/xormdriver"
+import xormdriver "github.com/zhoudm1743/gofast-xorm"
 
 app.SetProviders(append(providers, &xormdriver.ServiceProvider{}))
+```
+
+```go
+import gormdriver "github.com/zhoudm1743/gofast-gorm"
+
+app.SetProviders(append(providers, &gormdriver.ServiceProvider{}))
 ```
 
 ```yaml
@@ -627,7 +620,8 @@ UUID 自动赋值逻辑从 GORM callback 抽取到 `manager.go` 的通用 `Befor
 - [x] **T17** `framework/foundation/provider.go` — `Migrator` 接口适配新 `contracts.DB`（兼容旧 `contracts.Orm`）
 
 ### 暂缓（后续迭代）
-- [ ] `plugins/gofast-xorm/` — xorm Driver & Query 实现
+- [x] `plugins/gofast-xorm/` — 已发布 [`gofast-xorm`](https://github.com/zhoudm1743/gofast-xorm) v0.8.2
+- [x] `plugins/gofast-gorm/` — 已发布 [`gofast-gorm`](https://github.com/zhoudm1743/gofast-gorm) v0.8.2
 - [ ] `plugins/gofast-torm/` — torm Driver & Query 实现
 - [ ] `framework/database/drivers/gorm/migrator.go` — 集成 goose 版本化迁移
 - [ ] `go.work` — 创建 workspace 管理多模块
@@ -726,7 +720,8 @@ database:
 ```
 
 ### 暂缓（后续迭代）
-- [ ] `plugins/gofast-xorm/` — xorm Driver & Query 实现
+- [x] `plugins/gofast-xorm/` — 已发布 [`gofast-xorm`](https://github.com/zhoudm1743/gofast-xorm) v0.8.2
+- [x] `plugins/gofast-gorm/` — 已发布 [`gofast-gorm`](https://github.com/zhoudm1743/gofast-gorm) v0.8.2
 - [ ] `plugins/gofast-torm/` — torm Driver & Query 实现
 - [ ] `framework/database/drivers/gorm/migrator.go` — 集成 goose 版本化迁移
 - [ ] `go.work` — 创建 workspace 管理多模块

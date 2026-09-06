@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
-
-	"github.com/go-gorm/caches/v4"
 )
 
 // TestSerializeDeserialize_RoundTrip 验证 serialize/deserialize 各类值的往返保真。
@@ -63,10 +61,10 @@ func TestSerializeDeserialize_BytesRoundTrip(t *testing.T) {
 		t.Fatalf("字节往返不一致:\n got %s\nwant %s", got, orig)
 	}
 
-	// 验证还原后的字节可直接被 caches.Query.Unmarshal 解析（原 bug 在此失败）
-	var q caches.Query[any]
-	if err := q.Unmarshal(got); err != nil {
-		t.Fatalf("caches.Query.Unmarshal 应成功，实际失败: %v", err)
+	// 验证还原后的字节仍是合法 JSON（原 bug：经 redis store 往返后损坏，无法解析）
+	var payload map[string]any
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("还原字节应为合法 JSON，实际失败: %v", err)
 	}
 }
 

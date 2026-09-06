@@ -2,19 +2,23 @@ package database
 
 import (
 	"github.com/zhoudm1743/go-fast-framework/contracts"
-	gormdriver "github.com/zhoudm1743/go-fast-framework/database/drivers/gormdriver"
 	"github.com/zhoudm1743/go-fast-framework/foundation"
 )
 
 // ServiceProvider Database 服务提供者。
+// 注意：本 Provider 仅注册 db 管理器，不内置任何 ORM 驱动。
+// 业务需额外注册驱动插件，例如：
+//
+//	import gormdriver "github.com/zhoudm1743/gofast-gorm"
+//	app.SetProviders(append(providers, &gormdriver.ServiceProvider{}))
+//
+// 或：
+//
+//	import xormdriver "github.com/zhoudm1743/gofast-xorm"
+//	app.SetProviders(append(providers, &xormdriver.ServiceProvider{}))
 type ServiceProvider struct{}
 
 func (sp *ServiceProvider) Register(app foundation.Application) {
-	// 内置注册 GORM 驱动工厂
-	RegisterDriver("gormdriver", func(cfg ConnectionConfig, log contracts.Log) (contracts.Driver, error) {
-		return gormdriver.NewGormDriver(cfg, log)
-	})
-
 	// 注册新的 "db" 服务（contracts.DB）
 	app.Singleton("db", func(app foundation.Application) (any, error) {
 		cfg := app.MustMake("config").(contracts.Config)

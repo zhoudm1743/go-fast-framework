@@ -14,6 +14,7 @@ import (
 	"github.com/zhoudm1743/go-fast-framework/database"
 	"github.com/zhoudm1743/go-fast-framework/foundation"
 	"github.com/zhoudm1743/go-fast-framework/log"
+	gormdriver "github.com/zhoudm1743/gofast-gorm"
 )
 
 // 注册配置默认值。config.Add 在 init 阶段暂存，Boot 时自动写入 config 服务。
@@ -49,6 +50,7 @@ func main() {
 		&log.ServiceProvider{},
 		&cache.ServiceProvider{},
 		&database.ServiceProvider{},
+		&gormdriver.ServiceProvider{},
 	})
 	app.Boot()
 	defer app.Shutdown()

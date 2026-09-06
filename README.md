@@ -1,6 +1,6 @@
 # GoFast Framework
 
-> GoFast 框架核心 -- 一个轻量、可扩展的 Go 语言 Web 框架内核。提供 IoC 容器、ServiceProvider 生命周期、Facade 门面、配置文件、结构化日志、GORM 数据库、缓存、文件存储等企业级基础设施。
+> GoFast 框架核心 -- 一个轻量、可扩展的 Go 语言 Web 框架内核。提供 IoC 容器、ServiceProvider 生命周期、Facade 门面、配置文件、结构化日志、可插拔数据库、缓存、文件存储等企业级基础设施。
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-blue.svg)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -31,6 +31,8 @@ import (
     "github.com/zhoudm1743/go-fast-framework/foundation"
     gohttp "github.com/zhoudm1743/go-fast-framework/http"
     "github.com/zhoudm1743/go-fast-framework/log"
+    gofastfiber "github.com/zhoudm1743/gofast-fiber"
+    gormdriver "github.com/zhoudm1743/gofast-gorm"
 )
 
 func main() {
@@ -41,8 +43,10 @@ func main() {
         &log.ServiceProvider{},
         &cache.ServiceProvider{},
         &database.ServiceProvider{},
+        &gormdriver.ServiceProvider{},   // ORM 驱动需显式注册
         &filesystem.ServiceProvider{},
         &gohttp.ServiceProvider{},
+        &gofastfiber.ServiceProvider{}, // HTTP 引擎需显式注册（亦可换 gofast-gin）
     })
     app.Boot()
     facades.SetApp(app)
@@ -75,9 +79,9 @@ func main() {
 | **facades** | `facades/` | 全局静态门面，一行代码访问任意服务 |
 | **config** | `config/` | 基于 Viper 的配置管理，Go 代码 + YAML 双模式 |
 | **log** | `log/` | 基于 Zap 的结构化日志，控制台/文件/混合输出 |
-| **database** | `database/` | 基于 gorm/xorm 双驱动的数据库服务，多连接、时序 ID |
+| **database** | `database/` | 数据库管理器（多连接、时序 ID）；ORM 驱动见独立插件 |
 | **cache** | `cache/` | 缓存服务，支持内存/Redis/文件驱动 |
-| **http** | `http/` | HTTP 路由服务，双引擎（Gin / Fiber） |
+| **http** | `http/` | HTTP 抽象层（validator/session/view）；引擎见独立插件 |
 | **filesystem** | `filesystem/` | 文件存储，本地/OSS/COS/MinIO/S3 |
 | **jwt** | `jwt/` | JWT 鉴权服务 |
 | **event** | `event/` | 事件系统 |
@@ -86,6 +90,36 @@ func main() {
 | **fast** | `fast/` | CLI 控制台，脚手架命令 |
 | **id** | `id/` | UUID v7 时序 ID 生成 |
 | **utils** | `utils/` | 通用工具函数 |
+
+### ORM 驱动插件（独立仓库）
+
+框架核心不再内置 ORM。按需安装并显式注册：
+
+| 插件 | 模块 | 配置 `driver` |
+|------|------|----------------|
+| [gofast-gorm](https://github.com/zhoudm1743/gofast-gorm) | `github.com/zhoudm1743/gofast-gorm` | `gormdriver` |
+| [gofast-xorm](https://github.com/zhoudm1743/gofast-xorm) | `github.com/zhoudm1743/gofast-xorm` | `xorm` |
+
+```bash
+go get github.com/zhoudm1743/gofast-gorm@v0.8.2
+# 或
+go get github.com/zhoudm1743/gofast-xorm@v0.8.2
+```
+
+### HTTP 引擎插件（独立仓库）
+
+框架核心不再内置 Gin / Fiber。按需安装并显式注册：
+
+| 插件 | 模块 | 配置 `server.driver` |
+|------|------|----------------------|
+| [gofast-fiber](https://github.com/zhoudm1743/gofast-fiber) | `github.com/zhoudm1743/gofast-fiber` | `fiber`（默认） |
+| [gofast-gin](https://github.com/zhoudm1743/gofast-gin) | `github.com/zhoudm1743/gofast-gin` | `gin` |
+
+```bash
+go get github.com/zhoudm1743/gofast-fiber@v0.9.0
+# 或
+go get github.com/zhoudm1743/gofast-gin@v0.9.0
+```
 
 ---
 

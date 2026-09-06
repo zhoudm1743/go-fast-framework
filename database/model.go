@@ -3,12 +3,11 @@ package database
 import (
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 	"github.com/zhoudm1743/go-fast-framework/id"
-
-	"gorm.io/gorm"
 )
 
 // Model 基础模型，所有业务模型应嵌入此结构体。
 // ID 为时序 ID 字符串主键（16 字符），由框架层驱动在 Create 前自动调用 AutoGenerateID() 生成。
+// GORM 驱动另通过 Create 回调覆盖 FirstOrCreate 等内部路径（见 gofast-gorm）。
 type Model struct {
 	ID        string `gorm:"primaryKey;size:16;column:id"      xorm:"pk varchar(16) 'id'"    json:"id"`
 	CreatedAt int64  `gorm:"autoCreateTime;column:created_at"  xorm:"created 'created_at'"   json:"created_at"`
@@ -27,15 +26,6 @@ func (m *Model) AutoGenerateID() {
 	if m.ID == "" {
 		m.ID = id.New()
 	}
-}
-
-// BeforeCreate 实现 GORM 标准创建前钩子。
-// 覆盖 FirstOrCreate/FirstOrInit 等 GORM 内部创建路径（不经过框架驱动层的
-// invokeBeforeCreate，AutoGenerateID 无法触发），确保所有创建入口都能生成主键 ID。
-// 与框架 Create 的双重调用是安全的：AutoGenerateID 幂等（ID 非空即跳过）。
-func (m *Model) BeforeCreate(tx *gorm.DB) error {
-	m.AutoGenerateID()
-	return nil
 }
 
 // ModelWithSoftDelete 带软删除的基础模型。

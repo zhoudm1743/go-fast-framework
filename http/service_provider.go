@@ -5,8 +5,6 @@ import (
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 	"github.com/zhoudm1743/go-fast-framework/foundation"
-	fiberdriver "github.com/zhoudm1743/go-fast-framework/http/fiber"
-	gindriver "github.com/zhoudm1743/go-fast-framework/http/gin"
 	gosession "github.com/zhoudm1743/go-fast-framework/http/session"
 	validation "github.com/zhoudm1743/go-fast-framework/http/validation"
 	goview "github.com/zhoudm1743/go-fast-framework/http/view"
@@ -19,10 +17,20 @@ type viewSetter interface {
 }
 
 // ServiceProvider HTTP 路由服务提供者。
-// 通过配置 server.driver（fiber | gin）选择底层框架，默认为 fiber。
+// 本 Provider 注册 validator / session / view / route 管理逻辑，
+// 不内置任何 HTTP 引擎驱动。业务需额外注册驱动插件，例如：
 //
-// 可选 HTML 模板渲染：在 config.yaml 中配置 view.dir 即可启用，
-// 无需额外注册 ServiceProvider。
+//	import gofastgin "github.com/zhoudm1743/gofast-gin"
+//	app.SetProviders(append(providers, &gofastgin.ServiceProvider{}))
+//
+// 或：
+//
+//	import gofastfiber "github.com/zhoudm1743/gofast-fiber"
+//	app.SetProviders(append(providers, &gofastfiber.ServiceProvider{}))
+//
+// 通过配置 server.driver（gin | fiber）选择已注册的驱动，默认为 fiber。
+//
+// 可选 HTML 模板渲染：在 config.yaml 中配置 view.dir 即可启用。
 type ServiceProvider struct{}
 
 func (sp *ServiceProvider) Register(app foundation.Application) {
@@ -62,16 +70,11 @@ func (sp *ServiceProvider) Register(app foundation.Application) {
 		log := app.MustMake("log").(contracts.Log)
 
 		driver := cfg.GetString("server.driver", "fiber")
-		var (
-			r   contracts.Route
-			err error
-		)
-		switch driver {
-		case "gin":
-			r, err = gindriver.NewRoute(cfg, validator, storage, log)
-		default: // fiber
-			r, err = fiberdriver.NewRoute(cfg, validator, storage, log)
+		factory, err := mustRouteFactory(driver)
+		if err != nil {
+			return nil, err
 		}
+		r, err := factory(cfg, validator, storage, log)
 		if err != nil {
 			return nil, err
 		}

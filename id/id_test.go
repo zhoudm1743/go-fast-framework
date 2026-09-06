@@ -8,35 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/glebarez/sqlite"
 	"github.com/zhoudm1743/go-fast-framework/id"
-	"gorm.io/gorm"
-	gormLogger "gorm.io/gorm/logger"
 )
-
-// ── 数据库辅助 ────────────────────────────────────────────────────────
-
-// idRow 用于数据库排序测试，Seq 记录插入时的期望顺序。
-type idRow struct {
-	ID  string `gorm:"primaryKey;size:16;column:id"`
-	Seq int    `gorm:"column:seq;not null"`
-}
-
-func (idRow) TableName() string { return "test_id_rows" }
-
-func openSQLite(t *testing.T) *gorm.DB {
-	t.Helper()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
-		Logger: gormLogger.Default.LogMode(gormLogger.Silent),
-	})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	if err := db.AutoMigrate(&idRow{}); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return db
-}
 
 // ── 基本属性 ──────────────────────────────────────────────────────────
 
@@ -354,128 +327,90 @@ func TestParse_RoundTrip_Normalization(t *testing.T) {
 	}
 }
 
-// ── 数据库排序：SQLite in-memory ──────────────────────────────────────
+// ── 字典序/时序排序（模拟 TEXT 主键 ORDER BY，不依赖 ORM）──────────────
 
-// TestDB_OrderByAsc 顺序插入 500 条，验证 ORDER BY id ASC 顺序 = 插入顺序。
-func TestDB_OrderByAsc(t *testing.T) {
-	db := openSQLite(t)
+// TestLexOrder_Asc 顺序生成 500 个 ID，验证字典序升序 = 生成顺序
+// （与 SQLite TEXT 主键 ORDER BY id ASC 语义一致）。
+func TestLexOrder_Asc(t *testing.T) {
 	const n = 500
-
 	ids := make([]string, n)
 	for i := 0; i < n; i++ {
-		r := idRow{ID: id.New(), Seq: i}
-		if err := db.Create(&r).Error; err != nil {
-			t.Fatalf("insert seq=%d: %v", i, err)
-		}
-		ids[i] = r.ID
+		ids[i] = id.New()
 	}
-
-	var rows []idRow
-	if err := db.Order("id ASC").Find(&rows).Error; err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if len(rows) != n {
-		t.Fatalf("expected %d rows, got %d", n, len(rows))
-	}
-	for i, row := range rows {
-		if row.ID != ids[i] {
-			t.Fatalf("ORDER BY ASC mismatch at pos %d: got seq=%d id=%q, want seq=%d id=%q",
-				i, row.Seq, row.ID, i, ids[i])
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	for i := range ids {
+		if sorted[i] != ids[i] {
+			t.Fatalf("lex ASC mismatch at pos %d: got %q want %q", i, sorted[i], ids[i])
 		}
 	}
 }
 
-// TestDB_OrderByDesc 验证 ORDER BY id DESC 得到严格逆序（最新先出）。
-func TestDB_OrderByDesc(t *testing.T) {
-	db := openSQLite(t)
+// TestLexOrder_Desc 验证字典序降序为生成顺序的严格逆序。
+func TestLexOrder_Desc(t *testing.T) {
 	const n = 200
-
 	ids := make([]string, n)
 	for i := 0; i < n; i++ {
-		r := idRow{ID: id.New(), Seq: i}
-		if err := db.Create(&r).Error; err != nil {
-			t.Fatal(err)
-		}
-		ids[i] = r.ID
+		ids[i] = id.New()
 	}
-
-	var rows []idRow
-	db.Order("id DESC").Find(&rows)
-	for i, row := range rows {
-		expected := ids[n-1-i]
-		if row.ID != expected {
-			t.Fatalf("ORDER BY DESC mismatch at pos %d: got %q want %q", i, row.ID, expected)
+	sorted := append([]string(nil), ids...)
+	sort.Sort(sort.Reverse(sort.StringSlice(sorted)))
+	for i := range ids {
+		if sorted[i] != ids[n-1-i] {
+			t.Fatalf("lex DESC mismatch at pos %d: got %q want %q", i, sorted[i], ids[n-1-i])
 		}
 	}
 }
 
-// TestDB_FirstLast 验证 GORM First() 返回最旧记录，Last() 返回最新记录。
-func TestDB_FirstLast(t *testing.T) {
-	db := openSQLite(t)
+// TestLexOrder_FirstLast 验证字典序最小/最大分别对应最早/最晚生成的 ID。
+func TestLexOrder_FirstLast(t *testing.T) {
 	const n = 100
-
 	ids := make([]string, n)
 	for i := 0; i < n; i++ {
-		r := idRow{ID: id.New(), Seq: i}
-		if err := db.Create(&r).Error; err != nil {
-			t.Fatal(err)
-		}
-		ids[i] = r.ID
+		ids[i] = id.New()
 	}
-
-	var first, last idRow
-	db.First(&first)
-	db.Last(&last)
-
-	if first.Seq != 0 || first.ID != ids[0] {
-		t.Fatalf("First() returned seq=%d id=%q, want seq=0 id=%q", first.Seq, first.ID, ids[0])
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	if sorted[0] != ids[0] {
+		t.Fatalf("first: got %q want %q", sorted[0], ids[0])
 	}
-	if last.Seq != n-1 || last.ID != ids[n-1] {
-		t.Fatalf("Last() returned seq=%d id=%q, want seq=%d id=%q", last.Seq, last.ID, n-1, ids[n-1])
+	if sorted[n-1] != ids[n-1] {
+		t.Fatalf("last: got %q want %q", sorted[n-1], ids[n-1])
 	}
 }
 
-// TestDB_RangeQuery 验证时间范围查询（id BETWEEN ? AND ?）能正确过滤。
-func TestDB_RangeQuery(t *testing.T) {
-	db := openSQLite(t)
-
+// TestLexOrder_Range 验证按 ID 边界做字典序区间过滤。
+func TestLexOrder_Range(t *testing.T) {
 	const total = 100
 	ids := make([]string, total)
 	for i := 0; i < total; i++ {
-		r := idRow{ID: id.New(), Seq: i}
-		if err := db.Create(&r).Error; err != nil {
-			t.Fatal(err)
-		}
-		ids[i] = r.ID
+		ids[i] = id.New()
 	}
-
-	// 取中间 [20, 79] 共 60 条（按 ID 前后边界）
 	lo, hi := ids[20], ids[79]
-	var rows []idRow
-	db.Where("id BETWEEN ? AND ?", lo, hi).Order("id ASC").Find(&rows)
-
-	if len(rows) != 60 {
-		t.Fatalf("range query: expected 60 rows, got %d", len(rows))
+	var got []string
+	for _, v := range ids {
+		if v >= lo && v <= hi {
+			got = append(got, v)
+		}
 	}
-	if rows[0].Seq != 20 || rows[59].Seq != 79 {
-		t.Fatalf("range query boundary wrong: seq[0]=%d seq[59]=%d", rows[0].Seq, rows[59].Seq)
+	sort.Strings(got)
+	if len(got) != 60 {
+		t.Fatalf("range: expected 60, got %d", len(got))
+	}
+	if got[0] != ids[20] || got[59] != ids[79] {
+		t.Fatalf("range boundary wrong: first=%q last=%q", got[0], got[59])
 	}
 }
 
-// ── 多租户并发数据库测试 ───────────────────────────────────────────────
+// ── 多租户并发排序 ────────────────────────────────────────────────────
 
-// TestDB_MultiTenant_ConcurrentInsert 模拟 4 个租户并发插入（各自独立 DB），
-// 验证：每个租户表内 ORDER BY id 与插入顺序一致；跨租户 ID 全局唯一。
-func TestDB_MultiTenant_ConcurrentInsert(t *testing.T) {
+// TestMultiTenant_ConcurrentLexOrder 模拟 4 个租户并发生成 ID，
+// 验证：每个租户局部字典序与生成顺序一致；跨租户 ID 全局唯一。
+func TestMultiTenant_ConcurrentLexOrder(t *testing.T) {
 	const tenants = 4
 	const rowsPerTenant = 200
 
-	dbs := make([]*gorm.DB, tenants)
-	for i := range dbs {
-		dbs[i] = openSQLite(t)
-	}
-
-	allIDs := make([][]string, tenants) // [tenant][row_index]
+	allIDs := make([][]string, tenants)
 	var wg sync.WaitGroup
 	wg.Add(tenants)
 
@@ -485,38 +420,24 @@ func TestDB_MultiTenant_ConcurrentInsert(t *testing.T) {
 			defer wg.Done()
 			ids := make([]string, rowsPerTenant)
 			for i := 0; i < rowsPerTenant; i++ {
-				r := idRow{ID: id.New(), Seq: i}
-				if err := dbs[tenant].Create(&r).Error; err != nil {
-					t.Errorf("tenant %d insert seq=%d: %v", tenant, i, err)
-					return
-				}
-				ids[i] = r.ID
+				ids[i] = id.New()
 			}
 			allIDs[tenant] = ids
 		}()
 	}
 	wg.Wait()
 
-	// 每个租户表内：ORDER BY id ASC = 插入顺序
 	for tenant, insertedIDs := range allIDs {
-		if len(insertedIDs) == 0 {
-			continue
-		}
-		var rows []idRow
-		dbs[tenant].Order("id ASC").Find(&rows)
-		if len(rows) != rowsPerTenant {
-			t.Errorf("tenant %d: expected %d rows, got %d", tenant, rowsPerTenant, len(rows))
-			continue
-		}
-		for j, row := range rows {
-			if row.ID != insertedIDs[j] {
-				t.Errorf("tenant %d pos %d: ORDER BY mismatch got %q want %q",
-					tenant, j, row.ID, insertedIDs[j])
+		sorted := append([]string(nil), insertedIDs...)
+		sort.Strings(sorted)
+		for j := range insertedIDs {
+			if sorted[j] != insertedIDs[j] {
+				t.Errorf("tenant %d pos %d: lex order mismatch got %q want %q",
+					tenant, j, sorted[j], insertedIDs[j])
 			}
 		}
 	}
 
-	// 跨租户全局唯一（无碰撞）
 	seen := make(map[string]int, tenants*rowsPerTenant)
 	for tenant, ids := range allIDs {
 		for _, v := range ids {
@@ -528,9 +449,9 @@ func TestDB_MultiTenant_ConcurrentInsert(t *testing.T) {
 	}
 }
 
-// TestDB_MultiTenant_GlobalMergeOrder 将所有租户的 ID 合并后排序，
+// TestMultiTenant_GlobalMergeOrder 将所有租户的 ID 合并后排序，
 // 验证合并后的排序是一个合法的全局时序（每个租户的局部顺序被保留）。
-func TestDB_MultiTenant_GlobalMergeOrder(t *testing.T) {
+func TestMultiTenant_GlobalMergeOrder(t *testing.T) {
 	const tenants = 6
 	const rowsPerTenant = 50
 
@@ -550,7 +471,6 @@ func TestDB_MultiTenant_GlobalMergeOrder(t *testing.T) {
 	}
 	wg.Wait()
 
-	// 合并所有 ID 并全局排序
 	type taggedID struct {
 		v      string
 		tenant int
@@ -564,7 +484,6 @@ func TestDB_MultiTenant_GlobalMergeOrder(t *testing.T) {
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].v < all[j].v })
 
-	// 对每个租户，验证其在全局排序中出现的顺序 = 本地顺序。
 	tenantLastSeq := make([]int, tenants)
 	for i := range tenantLastSeq {
 		tenantLastSeq[i] = -1

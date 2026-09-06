@@ -1,6 +1,8 @@
 # 查询缓存 Example（SQLite）
 
-演示 `Query().Cache()` 查询缓存的命中与失效，使用 SQLite 文件库，零外部依赖。
+演示 `Query().Cache()` 查询缓存的命中与失效，使用 SQLite 文件库。
+
+依赖驱动插件 [`gofast-gorm`](https://github.com/zhoudm1743/gofast-gorm)。
 
 ## 运行
 
