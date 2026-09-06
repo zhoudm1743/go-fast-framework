@@ -173,6 +173,8 @@ type Query interface {
 	Create(value any) error
 	CreateInBatches(value any, batchSize int) error
 	Save(value any) error
+	// Update/Updates 的列值支持 contracts.Expr 表达式（跨驱动，X-08）：
+	// Update("count", Expr("count + ?", 1)) 生成 "SET count = count + ?" 原子表达式
 	Update(column string, value any) error
 	Updates(values any) error
 	Delete(value any, conds ...any) error
@@ -192,6 +194,9 @@ type Query interface {
 	// ── 原生 SQL ────────────────────────────────────────────
 	Raw(sql string, values ...any) Query
 	Exec(sql string, values ...any) error
+	// ExecResult 执行原生 SQL 写操作并返回受影响行数（X-08）。
+	// 需依据行数做业务判定（如配额原子扣减、存在性更新）时使用。
+	ExecResult(sql string, values ...any) Result
 
 	// ── 事务 ────────────────────────────────────────────────
 	Transaction(fc func(tx Query) error, opts ...TxOption) error
@@ -297,4 +302,38 @@ type DB interface {
 	// Register 在运行时动态注册一个命名连接（多租户场景使用）。
 	// 若同名连接已存在，则关闭旧连接并替换。
 	Register(name string, cfg ConnectionConfig) error
+}
+
+// ── SQL 表达式（跨驱动，X-08）─────────────────────────────────────────
+
+// SQLExpression SQL 表达式值的驱动识别接口。
+// 由 Expr 返回的值实现；各驱动在 Update/Updates 的列值位置检测该接口，
+// 将表达式交给底层 ORM 渲染（gormdriver → gorm.Expr，xormdriver → builder
+// 组装），实现 "SET col = col + ?" 等数据库端原子表达式。
+type SQLExpression interface {
+	// ExprSQL 返回表达式 SQL 与绑定参数
+	ExprSQL() (query string, args []any)
+}
+
+// sqlExpr SQL 表达式值（unexported：只能经 Expr 创建，驱动经接口识别）。
+type sqlExpr struct {
+	query string
+	args  []any
+}
+
+var _ SQLExpression = (*sqlExpr)(nil)
+
+func (e *sqlExpr) ExprSQL() (string, []any) { return e.query, e.args }
+
+// Expr 创建 SQL 表达式值，用于 Update/Updates 的列值位置，由数据库执行表达式
+// 而非绑定常量。签名与 gorm.Expr 对齐，业务代码零成本迁移：
+//
+//	q.Model(&Quota{}).Where("id = ?", id).Update("used_bytes", Expr("used_bytes + ?", n))
+//	q.Table("quotas").Updates(map[string]any{"used_bytes": Expr("GREATEST(used_bytes - ?, 0)", n)})
+//
+// 说明：表达式 SQL 由调用方保证可信（列名/字面量拼接有注入风险，参数一律用 ?）。
+// 驱动差异：gormdriver 完整支持；xormdriver 支持 Update/Updates 中的表达式列
+// （经 builder 组装，链上 Where/Where 变参条件生效），链上 Limit/Offset 不参与 UPDATE。
+func Expr(query string, args ...any) SQLExpression {
+	return &sqlExpr{query: query, args: args}
 }

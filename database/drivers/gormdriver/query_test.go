@@ -400,3 +400,210 @@ func TestSelectStar_OverridesSelect(t *testing.T) {
 		t.Errorf("Select(id) 后再 Select(*) 应恢复全字段, Name 实际 %q", rows[0].Name)
 	}
 }
+
+// ── SQL 表达式（X-08）测试 ──────────────────────────────────────────
+
+// ExprModel 表达式测试用模型（含 count 计数字段，验证数据库端原子表达式更新）
+type ExprModel struct {
+	ID    string `gorm:"primaryKey;size:16"`
+	Name  string `gorm:"size:100"`
+	Count int64  `gorm:"column:count"`
+}
+
+func (m *ExprModel) AutoGenerateID() {
+	// 测试中手动设置 ID
+}
+
+// newTestDriverWithExprTable 创建带 ExprModel 表的测试驱动
+func newTestDriverWithExprTable(t *testing.T) *GormDriver {
+	t.Helper()
+	drv := newTestDriver(t)
+	if err := drv.AutoMigrate(&ExprModel{}); err != nil {
+		t.Fatalf("自动迁移失败: %v", err)
+	}
+	return drv
+}
+
+func TestGormExpr_Update(t *testing.T) {
+	drv := newTestDriverWithExprTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&ExprModel{ID: "expr001", Name: "alice", Count: 10}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	// 数据库端原子自增：SET count = count + 5
+	if err := q.Model(&ExprModel{}).Where("id = ?", "expr001").Update("count", contracts.Expr("count + ?", 5)); err != nil {
+		t.Fatalf("Update(表达式) 失败: %v", err)
+	}
+
+	var got ExprModel
+	if err := q.First(&got, "id = ?", "expr001"); err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if got.Count != 15 {
+		t.Errorf("count 期望 15, 实际 %d", got.Count)
+	}
+}
+
+func TestGormExpr_Updates(t *testing.T) {
+	drv := newTestDriverWithExprTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&ExprModel{ID: "expr002", Name: "bob", Count: 1}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	// 表达式与普通值混合
+	values := map[string]any{
+		"count": contracts.Expr("count + ?", 1),
+		"name":  "x",
+	}
+	if err := q.Model(&ExprModel{}).Where("id = ?", "expr002").Updates(values); err != nil {
+		t.Fatalf("Updates(混合表达式) 失败: %v", err)
+	}
+
+	// 调用方传入的 map 不得被修改（表达式值应保持原样）
+	if _, ok := values["count"].(contracts.SQLExpression); !ok {
+		t.Errorf("调用方 map 中的表达式值被篡改: %T %v", values["count"], values["count"])
+	}
+	if values["name"] != "x" {
+		t.Errorf("调用方 map 中的普通值被篡改: %v", values["name"])
+	}
+
+	var got ExprModel
+	if err := q.First(&got, "id = ?", "expr002"); err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if got.Count != 2 {
+		t.Errorf("count 期望 2, 实际 %d", got.Count)
+	}
+	if got.Name != "x" {
+		t.Errorf("name 期望 x, 实际 %q", got.Name)
+	}
+}
+
+func TestGormExpr_ExecResult(t *testing.T) {
+	drv := newTestDriverWithExprTable(t)
+	q := drv.Query()
+
+	// INSERT 命中 1 行
+	res := q.ExecResult("INSERT INTO expr_models (id, name, count) VALUES (?, ?, ?)", "expr003", "carol", 7)
+	if res.Error != nil {
+		t.Fatalf("ExecResult(INSERT) 失败: %v", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		t.Errorf("INSERT RowsAffected 期望 1, 实际 %d", res.RowsAffected)
+	}
+
+	// UPDATE 命中 1 行
+	res = q.ExecResult("UPDATE expr_models SET count = count + 1 WHERE id = ?", "expr003")
+	if res.Error != nil {
+		t.Fatalf("ExecResult(UPDATE) 失败: %v", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		t.Errorf("UPDATE RowsAffected 期望 1, 实际 %d", res.RowsAffected)
+	}
+
+	// UPDATE 未命中：Error 为 nil 但 RowsAffected = 0，经 IsZeroRow 判定
+	res = q.ExecResult("UPDATE expr_models SET count = count + 1 WHERE id = ?", "missing")
+	if res.Error != nil {
+		t.Fatalf("ExecResult(未命中) 不应报错: %v", res.Error)
+	}
+	if !res.IsZeroRow() {
+		t.Errorf("未命中应 IsZeroRow, 实际 RowsAffected=%d, Error=%v", res.RowsAffected, res.Error)
+	}
+
+	// 回读验证原生 SQL 表达式生效
+	var got ExprModel
+	if err := q.First(&got, "id = ?", "expr003"); err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if got.Count != 8 {
+		t.Errorf("count 期望 8, 实际 %d", got.Count)
+	}
+}
+
+func TestGormExpr_UpdateWithWhere(t *testing.T) {
+	drv := newTestDriverWithExprTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&ExprModel{ID: "expr004", Name: "dave", Count: 0}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+	if err := q.Create(&ExprModel{ID: "expr005", Name: "eve", Count: 0}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	// 链上 Where 与表达式组合：只影响目标行
+	if err := q.Model(&ExprModel{}).Where("id = ?", "expr004").Update("count", contracts.Expr("count + ?", 3)); err != nil {
+		t.Fatalf("Update 失败: %v", err)
+	}
+
+	var rows []ExprModel
+	if err := q.Model(&ExprModel{}).Order("id").Find(&rows); err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("期望 2 行, 实际 %d", len(rows))
+	}
+	for _, row := range rows {
+		want := int64(0)
+		if row.ID == "expr004" {
+			want = 3
+		}
+		if row.Count != want {
+			t.Errorf("id=%s count 期望 %d, 实际 %d", row.ID, want, row.Count)
+		}
+	}
+}
+
+func TestGormExpr_ResultVariants(t *testing.T) {
+	drv := newTestDriverWithExprTable(t)
+	q := drv.Query()
+
+	if err := q.Create(&ExprModel{ID: "expr006", Name: "frank", Count: 100}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	// UpdateResult 携带表达式：数据库端原子扣减
+	res := q.Model(&ExprModel{}).Where("id = ?", "expr006").UpdateResult("count", contracts.Expr("count - ?", 30))
+	if res.Error != nil {
+		t.Fatalf("UpdateResult 失败: %v", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		t.Errorf("UpdateResult RowsAffected 期望 1, 实际 %d", res.RowsAffected)
+	}
+
+	// UpdatesResult 表达式与普通值混合
+	res = q.Model(&ExprModel{}).Where("id = ?", "expr006").UpdatesResult(map[string]any{
+		"count": contracts.Expr("count * 2"),
+		"name":  "g",
+	})
+	if res.Error != nil {
+		t.Fatalf("UpdatesResult 失败: %v", res.Error)
+	}
+	if res.RowsAffected != 1 {
+		t.Errorf("UpdatesResult RowsAffected 期望 1, 实际 %d", res.RowsAffected)
+	}
+
+	var got ExprModel
+	if err := q.First(&got, "id = ?", "expr006"); err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if got.Count != 140 { // (100 - 30) * 2
+		t.Errorf("count 期望 140, 实际 %d", got.Count)
+	}
+	if got.Name != "g" {
+		t.Errorf("name 期望 g, 实际 %q", got.Name)
+	}
+
+	// 未命中：RowsAffected 语义不变 → IsZeroRow
+	res = q.Model(&ExprModel{}).Where("id = ?", "missing").UpdateResult("count", contracts.Expr("count + ?", 1))
+	if res.Error != nil {
+		t.Fatalf("UpdateResult(未命中) 不应报错: %v", res.Error)
+	}
+	if !res.IsZeroRow() {
+		t.Errorf("未命中应 IsZeroRow, 实际 RowsAffected=%d", res.RowsAffected)
+	}
+}

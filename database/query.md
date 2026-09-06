@@ -477,6 +477,7 @@ database:
 | `Where("id IN ?", 切片)` | **0.8.1 起对齐 gorm 语义**：`IN ?`/`IN (?)` 绑定切片参数时自动展开为 `IN (?,?,...)` 并平铺参数；空切片展开为 `IN (NULL)`（恒假）；`NOT IN ?` 同样生效 |
 | `Count` | **0.8.1 起剥离链上 ORDER BY**（对齐 gorm Count）：聚合列不在排序列集合内时 PG 严格模式不再报 42803 |
 | `Save` | **0.8.1 起对齐 gorm upsert 语义**：主键非零更新命中 0 行时回落 INSERT；嵌入 `database.Model` 的模型主键经 `FieldIndex` 定位（兼容 `extends` 嵌入路径） |
+| `Expr` / `ExecResult` | **0.8.1 新增跨驱动 SQL 表达式**（`contracts.Expr`）：`Update("count", Expr("count + ?", 1))` / `Updates(map[string]any{..., "used": Expr("used - ?", n)})` 由数据库端原子执行（`SET col = col + ?`），避免"先读后写"竞态。gormdriver 映射 `gorm.Expr` 完整支持；xormdriver 经 builder 组装 UPDATE（xorm `SetExpr` 不支持带参表达式，见 `query_write.go`），链上 Where 条件生效，Limit/Offset 不参与 UPDATE，struct 形态 Updates 不支持表达式（用 map）。**`ExecResult`**（0.8.1 新增）：原生 SQL 写操作返回 `RowsAffected`，替代"Exec 无行数"的旧限制，适合按行数做业务判定的场景（配额原子扣减、存在性更新等） |
 | 列名映射 | **0.8.1 起默认 `names.GonicMapper`**（xorm 原生，常用缩写不加下划线：`DeptID→dept_id`、`ID→id`、`PID→pid`），与 gormdriver 派生列名一致；`naming: "snake"` 配置回退 SnakeMapper（v0.8.0 行为，`DeptID→dept_i_d`）。表名仍为 SnakeMapper 单数 + TablePrefix |
 | `Debug()` | no-op：xorm 无 per-session 调试开关，SQL 日志由引擎级 logger 统一配置（`logger.go` 桥接框架 log 服务与慢查询阈值） |
 | `Lock()` | 仅 `LockForUpdate` 落地（执行期 `session.ForUpdate()` 生成 `FOR UPDATE`）；`LockShareMode` 等 xorm 无对应能力，no-op |

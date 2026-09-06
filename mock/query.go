@@ -24,6 +24,7 @@ type MockQuery struct {
 	ScanFunc           func(dest any) error
 	PluckFunc          func(column string, dest any) error
 	ExecFunc           func(sql string, values ...any) error
+	ExecResultFunc     func(sql string, values ...any) contracts.Result
 	TransactionFunc    func(fc func(tx contracts.Query) error, opts ...contracts.TxOption) error
 	BeginFunc          func(opts ...contracts.TxOption) contracts.Query
 	CommitFunc         func() error
@@ -52,7 +53,8 @@ func (q *MockQuery) clone() *MockQuery {
 		CreateFunc: q.CreateFunc, CreateInBatchesFunc: q.CreateInBatchesFunc, SaveFunc: q.SaveFunc,
 		UpdateFunc: q.UpdateFunc, UpdatesFunc: q.UpdatesFunc, DeleteFunc: q.DeleteFunc,
 		CountFunc: q.CountFunc, ScanFunc: q.ScanFunc, PluckFunc: q.PluckFunc,
-		ExecFunc: q.ExecFunc, TransactionFunc: q.TransactionFunc, BeginFunc: q.BeginFunc,
+		ExecFunc: q.ExecFunc, ExecResultFunc: q.ExecResultFunc,
+		TransactionFunc: q.TransactionFunc, BeginFunc: q.BeginFunc,
 		CommitFunc: q.CommitFunc, RollbackFunc: q.RollbackFunc, ExistsFunc: q.ExistsFunc,
 		RawFunc: q.RawFunc, WhereFunc: q.WhereFunc, TableFunc: q.TableFunc, ModelFunc: q.ModelFunc,
 		SelectFunc: q.SelectFunc, OrderFunc: q.OrderFunc, LimitFunc: q.LimitFunc, OffsetFunc: q.OffsetFunc,
@@ -169,6 +171,10 @@ func (q *MockQuery) Raw(sql string, values ...any) contracts.Query {
 func (q *MockQuery) Exec(sql string, values ...any) error {
 	if q.ExecFunc != nil { return q.ExecFunc(sql, values...) }
 	return q.err("Exec")
+}
+func (q *MockQuery) ExecResult(sql string, values ...any) contracts.Result {
+	if q.ExecResultFunc != nil { return q.ExecResultFunc(sql, values...) }
+	return contracts.Result{Error: q.err("ExecResult")}
 }
 
 func (q *MockQuery) Transaction(fc func(tx contracts.Query) error, opts ...contracts.TxOption) error {

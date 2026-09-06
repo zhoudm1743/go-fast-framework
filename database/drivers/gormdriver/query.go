@@ -306,12 +306,49 @@ func (q *GormQuery) Save(value any) error {
 	return invokeAfterUpdate(q, value)
 }
 
+// toGormValue 将列值中的 SQL 表达式（contracts.Expr 的返回值，X-08）转换为
+// gorm.Expr，由数据库端执行（如 "count + ?" 实现原子自增）；其余值原样返回。
+func toGormValue(v any) any {
+	if expr, ok := v.(contracts.SQLExpression); ok {
+		query, args := expr.ExprSQL()
+		return gorm.Expr(query, args...)
+	}
+	return v
+}
+
+// convertUpdateValues 处理 Updates 的批量更新值（X-08）：
+// values 为 map[string]any 且含 SQLExpression 时，拷贝一份新 map 逐值转换后传入
+// （不得修改调用方传入的 map）；struct 与其他类型原样返回——GORM 的 struct 更新
+// 不支持表达式字段，需要表达式时请改用 map 形式。
+func convertUpdateValues(values any) any {
+	m, ok := values.(map[string]any)
+	if !ok {
+		return values
+	}
+	hasExpr := false
+	for _, v := range m {
+		if _, ok := v.(contracts.SQLExpression); ok {
+			hasExpr = true
+			break
+		}
+	}
+	if !hasExpr {
+		return values
+	}
+	converted := make(map[string]any, len(m))
+	for k, v := range m {
+		converted[k] = toGormValue(v)
+	}
+	return converted
+}
+
 func (q *GormQuery) Update(column string, value any) error {
-	return wrapError(q.db.Update(column, value).Error)
+	// 值为 SQL 表达式（contracts.Expr）时转换为 gorm.Expr，实现数据库端原子更新（X-08）。
+	return wrapError(q.db.Update(column, toGormValue(value)).Error)
 }
 
 func (q *GormQuery) Updates(values any) error {
-	return wrapError(q.db.Updates(values).Error)
+	return wrapError(q.db.Updates(convertUpdateValues(values)).Error)
 }
 
 func (q *GormQuery) Delete(value any, conds ...any) error {
@@ -365,12 +402,12 @@ func (q *GormQuery) CreateResult(value any) contracts.Result {
 }
 
 func (q *GormQuery) UpdateResult(column string, value any) contracts.Result {
-	tx := q.db.Update(column, value)
+	tx := q.db.Update(column, toGormValue(value))
 	return contracts.Result{RowsAffected: tx.RowsAffected, Error: wrapError(tx.Error)}
 }
 
 func (q *GormQuery) UpdatesResult(values any) contracts.Result {
-	tx := q.db.Updates(values)
+	tx := q.db.Updates(convertUpdateValues(values))
 	return contracts.Result{RowsAffected: tx.RowsAffected, Error: wrapError(tx.Error)}
 }
 
@@ -410,6 +447,14 @@ func (q *GormQuery) Raw(sql string, values ...any) contracts.Query {
 
 func (q *GormQuery) Exec(sql string, values ...any) error {
 	return wrapError(q.db.Exec(sql, values...).Error)
+}
+
+// ExecResult 执行原生 SQL 写操作并返回受影响行数（X-08）。
+// 与 Exec 的差异：Exec 只返回错误，ExecResult 额外携带 RowsAffected，
+// 适用于需要依据行数做业务判定的原生 SQL 场景（如配额原子扣减、存在性更新）。
+func (q *GormQuery) ExecResult(sql string, values ...any) contracts.Result {
+	tx := q.db.Exec(sql, values...)
+	return contracts.Result{RowsAffected: tx.RowsAffected, Error: wrapError(tx.Error)}
 }
 
 // ── 事务 ─────────────────────────────────────────────────────────────

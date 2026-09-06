@@ -216,6 +216,29 @@ func (q *XormQuery) Exec(sql string, values ...any) error {
 	return nil
 }
 
+// ExecResult 执行原生 SQL 写操作并返回受影响行数（X-08）。
+// 需依据行数做业务判定（如配额原子扣减、存在性更新）时使用：
+// RowsAffected 为 SQL 受影响行数；0 行（未命中）时 Error 为 nil，
+// 可经 IsZeroRow 判定。事务内复用事务 session，与 Exec 同路径；
+// 成功后失效查询缓存（写终结语义与 Exec 一致）。
+func (q *XormQuery) ExecResult(sql string, values ...any) contracts.Result {
+	s, err := q.build(nil)
+	if err != nil {
+		return contracts.Result{Error: q.done(err)}
+	}
+	args := append([]any{sql}, values...)
+	res, err := s.Exec(args...)
+	if err != nil {
+		return contracts.Result{Error: q.done(err)}
+	}
+	ra, err := res.RowsAffected()
+	if err != nil {
+		return contracts.Result{Error: q.done(err)}
+	}
+	q.invalidateCache()
+	return contracts.Result{RowsAffected: ra}
+}
+
 // ── 标量 Scan 支持 ───────────────────────────────────────────────────
 
 // scanScalar 从结果集首行提取首个标量值写入 dest（*基本类型）。

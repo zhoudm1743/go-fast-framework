@@ -45,7 +45,12 @@ func condKey(prefix string, query any, args []any) string {
 // Table 显式指定表名。schema 前缀延迟到执行期经 schemaTable(q.schema) 拼接，
 // 使 Schema() 无论先于或后于 Table() 调用都能生效。
 func (q *XormQuery) Table(name string) contracts.Query {
-	nq := q.wrap(func(c *XormQuery) { c.explicitTable = true })
+	// tableName 记录裸名：表达式 UPDATE（updateWithExpr）组装时经 q.schemaTable
+	// 执行期解析 schema 前缀，Schema() 后置调用同样生效。
+	nq := q.wrap(func(c *XormQuery) {
+		c.explicitTable = true
+		c.tableName = name
+	})
 	return nq.addApplier("table:"+name, func(q *XormQuery, s *xorm.Session) error {
 		s.Table(q.schemaTable(name))
 		return nil
@@ -68,6 +73,7 @@ func (q *XormQuery) Model(value any) contracts.Query {
 	nq := q.wrap(func(c *XormQuery) {
 		c.explicitTable = true
 		c.modelValue = value
+		c.tableName = name // 链上解析出的裸表名，供表达式 UPDATE 组装复用
 	})
 	return nq.addApplier("model:"+name, func(q *XormQuery, s *xorm.Session) error {
 		s.Table(q.schemaTable(name))
@@ -116,13 +122,13 @@ func (q *XormQuery) Omit(columns ...string) contracts.Query {
 }
 
 // Where 追加 AND 条件。类型校验在链上完成，applier 仅在执行期落到 session。
+// 同时把条件追加到 condSpecs（X-08）：普通查询路径不消费它，仅表达式 UPDATE
+// （updateWithExpr）用它组装 WHERE，两路语义一致。
 func (q *XormQuery) Where(query any, args ...any) contracts.Query {
 	if !validCondType(query) {
 		return q.setErr(fmt.Errorf("%w: Where 仅支持 string/builder.Cond/map[string]any，收到 %T", contracts.ErrUnsupported, query))
 	}
-	return q.addApplier(condKey("where:", query, args), func(q *XormQuery, s *xorm.Session) error {
-		return applyCondToSession(s, condWhere, query, args)
-	})
+	return q.addCondSpec(condKey("where:", query, args), condWhere, query, args)
 }
 
 // OrWhere 追加 OR 条件。
@@ -130,9 +136,7 @@ func (q *XormQuery) OrWhere(query any, args ...any) contracts.Query {
 	if !validCondType(query) {
 		return q.setErr(fmt.Errorf("%w: OrWhere 仅支持 string/builder.Cond/map[string]any，收到 %T", contracts.ErrUnsupported, query))
 	}
-	return q.addApplier(condKey("or:", query, args), func(q *XormQuery, s *xorm.Session) error {
-		return applyCondToSession(s, condOr, query, args)
-	})
+	return q.addCondSpec(condKey("or:", query, args), condOr, query, args)
 }
 
 // Not 追加取反条件。
@@ -140,8 +144,18 @@ func (q *XormQuery) Not(query any, args ...any) contracts.Query {
 	if !validCondType(query) {
 		return q.setErr(fmt.Errorf("%w: Not 仅支持 string/builder.Cond/map[string]any，收到 %T", contracts.ErrUnsupported, query))
 	}
-	return q.addApplier(condKey("not:", query, args), func(q *XormQuery, s *xorm.Session) error {
-		return applyCondToSession(s, condNot, query, args)
+	return q.addCondSpec(condKey("not:", query, args), condNot, query, args)
+}
+
+// addCondSpec Where/OrWhere/Not 的公共入口：追加 condSpec 副本后挂上原有的
+// 执行期 applier（普通查询路径行为完全不变）。addApplier 内部再次 wrap，
+// condSpecs 随写时复制一并深拷贝，不可变语义不破坏。
+func (q *XormQuery) addCondSpec(key string, mode condMode, query any, args []any) contracts.Query {
+	nq := q.wrap(func(c *XormQuery) {
+		c.condSpecs = append(c.condSpecs, condSpec{mode: mode, query: query, args: args})
+	})
+	return nq.addApplier(key, func(q *XormQuery, s *xorm.Session) error {
+		return applyCondToSession(s, mode, query, args)
 	})
 }
 

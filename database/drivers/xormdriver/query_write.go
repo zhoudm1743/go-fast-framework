@@ -182,7 +182,13 @@ func (q *XormQuery) Save(value any) error {
 // 单列用 map 传参而非 struct 字段：xorm 对 struct 默认跳过零值字段，
 // map 键无条件写入，保证 gorm Update"显式指定列（含零值）"的语义。
 // 不调用模型钩子，与 gorm 驱动一致。
+//
+// X-08：value 为 contracts.SQLExpression（contracts.Expr 返回值）时改走
+// updateWithExpr，生成 "SET col = <表达式>" 的数据库端原子更新。
 func (q *XormQuery) updateColumnCore(column string, value any) (int64, error) {
+	if _, ok := value.(contracts.SQLExpression); ok {
+		return q.updateWithExpr(q.tableName, map[string]any{column: value})
+	}
 	s, err := q.build(nil)
 	if err != nil {
 		return 0, q.done(err)
@@ -203,14 +209,145 @@ func (q *XormQuery) Update(column string, value any) error {
 }
 
 // updatesCore Updates 的公共内核：map 或 struct 批量字段更新。
+// X-08：map 中任一值为 contracts.SQLExpression（contracts.Expr 返回值）时改走
+// updateWithExpr——整个 map（表达式键 + 普通键）作为 SET 传入，builder.Eq 混排
+// 原值与 *Expression 渲染。
 // struct 传参时 xorm 跳过零值字段，与 gorm Updates(struct) 语义一致；
 // map 传参写入全部键。不调用模型钩子，与 gorm 驱动一致。
+// 注：struct 更新路径不支持表达式字段——xorm 的 struct 写入按列绑定字段值，
+// 无法承载 "col = col + ?" 形态的表达式，需要表达式请用 map 传参。
 func (q *XormQuery) updatesCore(values any) (int64, error) {
+	if m, ok := values.(map[string]any); ok && mapHasSQLExpr(m) {
+		return q.updateWithExpr(q.tableName, m)
+	}
 	s, err := q.build(nil)
 	if err != nil {
 		return 0, q.done(err)
 	}
 	n, err := s.Update(values)
+	if err != nil {
+		return 0, q.done(err)
+	}
+	q.invalidateCache()
+	return n, nil
+}
+
+// mapHasSQLExpr 判断 map 的值中是否存在 contracts.SQLExpression（X-08 分流判定）。
+func mapHasSQLExpr(m map[string]any) bool {
+	for _, v := range m {
+		if _, ok := v.(contracts.SQLExpression); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ── 表达式 UPDATE（X-08）─────────────────────────────────────────────
+//
+// xorm 的 Session.SetExpr(col, *builder.Expression) 不可用：*Expression 不匹配
+// WriteArgs 的 builder 分支，会被当作单参数绑定而报错。因此带参表达式
+// （contracts.Expr("count + ?", 5)）无法经 session 链式 API 渲染。
+//
+// 替代通道：xorm Session.Exec 支持传入单个 *builder.Builder（statement 的
+// ConvertSQLOrArgs 走 builder.ToSQL 展开），且在事务 session 上原样执行
+// （exec 分支按 isAutoCommit 走 tx.ExecContext），事务安全。故此处用
+// builder.Update(Eq).From(table).Where(cond) 组装完整 UPDATE，经 ToSQL
+// 得到 (sql, args) 后交 session.Exec——SET 中 Eq 值为 *Expression 时原生
+// 渲染为 SQL 并平铺参数，占位符与参数严格对齐。
+//
+// 与 gorm 的差异：链上 Limit/Offset 不参与 UPDATE（gorm 仅 MySQL 方言支持
+// UPDATE ... LIMIT，此处不覆盖）；ORM 钩子不触发（与普通 Update 路径一致）。
+
+// buildCond 按序合并链上 condSpecs 为单个 builder.Cond（表达式 UPDATE 的
+// WHERE 来源）。组合语义与 applyCondToSession 一致：
+//   - condWhere：builder.And(累计, 当前)，首个条件直接作为累计；
+//   - condOr：builder.Or(累计, 当前)；
+//   - condNot：builder.And(累计, builder.Not{当前})。
+//
+// 条件转换：string → builder.Expr（先经 expandSlicePlaceholders 展开 IN 切片
+// 占位符，与 session 路径语义一致）；map[string]any → builder.Eq；
+// builder.Cond 原样。condSpecs 为空（或全部无效）返回 nil，即无 WHERE。
+func (q *XormQuery) buildCond() builder.Cond {
+	var acc builder.Cond
+	for _, spec := range q.condSpecs {
+		var cur builder.Cond
+		switch cond := spec.query.(type) {
+		case string:
+			sqlStr, args := expandSlicePlaceholders(cond, spec.args)
+			cur = builder.Expr(sqlStr, args...)
+		case builder.Cond:
+			cur = cond
+		case map[string]any:
+			cur = builder.Eq(cond)
+		}
+		if cur == nil || !cur.IsValid() {
+			continue
+		}
+		if acc == nil {
+			// 首个有效条件直接作为累计
+			if spec.mode == condNot {
+				acc = negateCond(cur)
+			} else {
+				acc = cur
+			}
+			continue
+		}
+		switch spec.mode {
+		case condOr:
+			acc = builder.Or(acc, cur)
+		case condNot:
+			acc = builder.And(acc, negateCond(cur))
+		default:
+			acc = builder.And(acc, cur)
+		}
+	}
+	return acc
+}
+
+// negateCond 取反单个条件。builder v0.3.13 提供 Not（Cond 级取反，对
+// condAnd/condOr 自动加括号），直接使用。
+func negateCond(c builder.Cond) builder.Cond {
+	return builder.Not{c}
+}
+
+// updateWithExpr 表达式 UPDATE 的组装与执行（X-08）。
+// set 的值为 contracts.SQLExpression → builder.Expr（SET 渲染为 SQL 表达式），
+// 否则原值绑定；WHERE 来自 buildCond（链上 Where/OrWhere/Not 副本）。
+// table 为链上 Table()/Model() 记录的裸名，经 q.schemaTable 执行期解析
+// schema 前缀；为空（未显式指定表）时返回 ErrUnsupported 包装错误。
+func (q *XormQuery) updateWithExpr(table string, set map[string]any) (int64, error) {
+	if table == "" {
+		return 0, fmt.Errorf("%w: Update/Updates 表达式值要求链上已显式 Table()/Model()", contracts.ErrUnsupported)
+	}
+	setCond := builder.Eq{}
+	for col, v := range set {
+		if e, ok := v.(contracts.SQLExpression); ok {
+			sqlStr, args := e.ExprSQL()
+			setCond[col] = builder.Expr(sqlStr, args...)
+		} else {
+			setCond[col] = v
+		}
+	}
+	b := builder.Update(setCond).From(q.schemaTable(table))
+	if cond := q.buildCond(); cond != nil {
+		b = b.Where(cond)
+	}
+	sqlStr, args, err := builder.ToSQL(b)
+	if err != nil {
+		return 0, q.done(err)
+	}
+	// build(nil) 复用事务 session（事务内安全执行）；链上错误也在此统一透出。
+	s, err := q.build(nil)
+	if err != nil {
+		return 0, q.done(err)
+	}
+	execArgs := append(make([]any, 0, len(args)+1), sqlStr)
+	execArgs = append(execArgs, args...)
+	res, err := s.Exec(execArgs...)
+	if err != nil {
+		return 0, q.done(err)
+	}
+	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, q.done(err)
 	}
@@ -266,12 +403,14 @@ func (q *XormQuery) CreateResult(value any) contracts.Result {
 
 // UpdateResult 更新单列并返回结果。RowsAffected 为匹配 WHERE 的行数，
 // 0 行（未命中）时 Error 为 nil，可经 IsZeroRow 判定。
+// value 为 contracts.Expr 表达式时同样生效（X-08），RowsAffected 正常回填。
 func (q *XormQuery) UpdateResult(column string, value any) contracts.Result {
 	n, err := q.updateColumnCore(column, value)
 	return contracts.Result{RowsAffected: n, Error: err}
 }
 
 // UpdatesResult 批量更新字段并返回结果。RowsAffected 语义同 UpdateResult。
+// map 中含 contracts.Expr 表达式键时同样生效（X-08），RowsAffected 正常回填。
 func (q *XormQuery) UpdatesResult(values any) contracts.Result {
 	n, err := q.updatesCore(values)
 	return contracts.Result{RowsAffected: n, Error: err}

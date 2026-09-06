@@ -48,6 +48,15 @@ type XormDriver struct {
 // 与目标 session；返回错误时终止执行。
 type applierFn func(q *XormQuery, s *xorm.Session) error
 
+// condSpec 链上条件的规范化记录（X-08）：与 appliers 并行保留一份 {组合方式,
+// 条件, 参数}，专供表达式 UPDATE 组装 WHERE（updateWithExpr → buildCond）。
+// 普通查询路径不读它——执行期仍走 appliers，行为完全不变。
+type condSpec struct {
+	mode  condMode
+	query any
+	args  []any
+}
+
 // XormQuery 实现 contracts.Query。
 // 链式方法不修改自身，而是返回追加了 applier 的新实例（不可变语义，与 gormdriver
 // 一致）；终结方法执行时按序将 applier 应用到新建（或事务内复用）的 *xorm.Session。
@@ -59,6 +68,8 @@ type XormQuery struct {
 
 	explicitTable bool                   // Table()/Model() 已显式指定表名
 	modelValue    any                    // Model() 记录的 bean
+	tableName     string                 // Table()/Model() 记录的原始表名（裸名，执行期经 schemaTable 解析 schema 前缀）
+	condSpecs     []condSpec             // 链上条件副本（Where/OrWhere/Not 追加），仅表达式 UPDATE 组装 WHERE 时消费
 	limitN        int                    // LIMIT，<=0 表示未设置
 	startN        int                    // OFFSET，<=0 表示未设置
 	orderStr      string                 // ORDER BY 子句，build 末段统一应用（Count 可剥离）
@@ -83,6 +94,7 @@ func (q *XormQuery) wrap(mutate func(*XormQuery)) *XormQuery {
 	c.appliers = append(make([]applierFn, 0, len(q.appliers)+1), q.appliers...)
 	c.keyParts = append(make([]string, 0, len(q.keyParts)+1), q.keyParts...)
 	c.preloads = append(make([]preloadSpec, 0, len(q.preloads)+1), q.preloads...)
+	c.condSpecs = append(make([]condSpec, 0, len(q.condSpecs)+1), q.condSpecs...)
 	if mutate != nil {
 		mutate(&c)
 	}
