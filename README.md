@@ -101,9 +101,9 @@ func main() {
 | [gofast-xorm](https://github.com/zhoudm1743/gofast-xorm) | `github.com/zhoudm1743/gofast-xorm` | `xorm` |
 
 ```bash
-go get github.com/zhoudm1743/gofast-gorm@v0.8.2
+go get github.com/zhoudm1743/gofast-gorm@latest
 # 或
-go get github.com/zhoudm1743/gofast-xorm@v0.8.2
+go get github.com/zhoudm1743/gofast-xorm@latest
 ```
 
 ### HTTP 引擎插件（独立仓库）
@@ -116,9 +116,9 @@ go get github.com/zhoudm1743/gofast-xorm@v0.8.2
 | [gofast-gin](https://github.com/zhoudm1743/gofast-gin) | `github.com/zhoudm1743/gofast-gin` | `gin` |
 
 ```bash
-go get github.com/zhoudm1743/gofast-fiber@v0.9.0
+go get github.com/zhoudm1743/gofast-fiber@latest
 # 或
-go get github.com/zhoudm1743/gofast-gin@v0.9.0
+go get github.com/zhoudm1743/gofast-gin@latest
 ```
 
 ---
