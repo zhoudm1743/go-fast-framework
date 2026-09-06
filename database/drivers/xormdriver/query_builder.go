@@ -290,16 +290,25 @@ func applyCondToSession(s *xorm.Session, mode condMode, query any, args []any) e
 
 // inPlaceholderRe 匹配 SQL 条件串中的 IN 占位符两种写法：`IN ?` 与 `IN (?)`
 // （大小写不敏感；NOT IN / not in 同样命中——词边界保证不误伤含 in 的标识符）。
-var inPlaceholderRe = regexp.MustCompile(`(?i)\bin\s*(\(\s*\?\s*\)|\?)`)
+// placeholderRe 匹配全部 ? 占位符（IN 上下文判定经占位符前缀文本进行，
+// 保证前面还有普通 ? 时参数索引不错位）。
+var placeholderRe = regexp.MustCompile(`\?`)
 
 // expandSlicePlaceholders 将条件串中绑定到切片参数的 IN 占位符展开为
 // IN (?,?,...) 并平铺参数，对齐 gormdriver 对 Where("id IN ?", ids) 的语义。
 // 规则：
-//   - 切片参数（不含 []byte——它是单个二进制值）→ 按元素展开；
+//   - 遍历全部 ? 占位符按序消费参数（普通 ? 消费 1 个参数），
+//     避免 "type_code = ? AND value IN ?" 场景下 IN 错位到前一个参数
+//     （v0.8.1 首版缺陷：只扫描 IN 占位符导致参数索引错位）；
+//   - IN 占位符绑定切片参数（不含 []byte——它是单个二进制值）→ 按元素展开；
 //   - 空切片 → IN (NULL)（恒假，与 gorm 生成的 SQL 一致），不产生绑定参数；
-//   - 非切片参数保留原占位符形态原样透传。
+//   - 非切片参数或参数不足时占位符原样保留。
 func expandSlicePlaceholders(cond string, args []any) (string, []any) {
 	if len(args) == 0 {
+		return cond, args
+	}
+	matches := placeholderRe.FindAllStringIndex(cond, -1)
+	if len(matches) == 0 {
 		return cond, args
 	}
 	var out strings.Builder
@@ -307,38 +316,62 @@ func expandSlicePlaceholders(cond string, args []any) (string, []any) {
 	flat := make([]any, 0, len(args))
 	argIdx := 0
 	last := 0
-	for _, loc := range inPlaceholderRe.FindAllStringSubmatchIndex(cond, -1) {
+	for _, loc := range matches {
 		out.WriteString(cond[last:loc[0]])
-		if argIdx >= len(args) {
-			// 占位符多于参数：原样保留，交给 xorm 报参数缺失
-			out.WriteString(cond[loc[0]:loc[1]])
-			last = loc[1]
-			continue
+		// IN 上下文判定：占位符之前的文本去掉尾部空白后，括号形态再剥 "("，
+		// 以 "in" 结尾即命中（IN ? 与 IN (?) 两种形态，NOT IN 同样生效）
+		trimmed := strings.TrimRight(cond[last:loc[0]], " \t\n\r")
+		parenForm := strings.HasSuffix(trimmed, "(")
+		// cutset 同时含 "(" 与空白：剥掉括号后残留的尾随空格也要去掉
+		core := strings.TrimRight(trimmed, "( \t\n\r")
+		isInCtx := len(core) >= 2 && strings.EqualFold(core[len(core)-2:], "in")
+
+		// consumed 而非 nil 判定：参数本身为 nil（绑定为 NULL）时不得丢弃
+		arg := any(nil)
+		consumed := false
+		if argIdx < len(args) {
+			arg = args[argIdx]
+			argIdx++
+			consumed = true
 		}
-		v := args[argIdx]
-		argIdx++
-		rv := reflect.ValueOf(v)
-		if v != nil && rv.Kind() != reflect.String &&
-			(rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) &&
-			rv.Type().Elem().Kind() != reflect.Uint8 {
-			if n := rv.Len(); n == 0 {
-				out.WriteString("IN (NULL)")
-			} else {
-				out.WriteString("IN (")
-				for i := 0; i < n; i++ {
-					if i > 0 {
-						out.WriteString(",")
+
+		if isInCtx && arg != nil {
+			rv := reflect.ValueOf(arg)
+			if rv.Kind() != reflect.String &&
+				(rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) &&
+				rv.Type().Elem().Kind() != reflect.Uint8 {
+				n := rv.Len()
+				switch {
+				case n == 0:
+					if parenForm {
+						out.WriteString("NULL")
+					} else {
+						out.WriteString("(NULL)")
 					}
-					out.WriteString("?")
-					flat = append(flat, rv.Index(i).Interface())
+				default:
+					if !parenForm {
+						out.WriteString("(")
+					}
+					for i := 0; i < n; i++ {
+						if i > 0 {
+							out.WriteString(",")
+						}
+						out.WriteString("?")
+						flat = append(flat, rv.Index(i).Interface())
+					}
+					if !parenForm {
+						out.WriteString(")")
+					}
 				}
-				out.WriteString(")")
+				last = loc[1]
+				continue
 			}
-			last = loc[1]
-			continue
 		}
-		out.WriteString(cond[loc[0]:loc[1]])
-		flat = append(flat, v)
+		// 非 IN 上下文 / 非切片 / 参数不足：占位符原样保留
+		out.WriteString("?")
+		if consumed {
+			flat = append(flat, arg)
+		}
 		last = loc[1]
 	}
 	out.WriteString(cond[last:])

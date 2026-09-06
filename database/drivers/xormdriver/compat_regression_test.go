@@ -69,6 +69,60 @@ func TestXormCompat_InSliceExpansion(t *testing.T) {
 	}
 }
 
+// TestXormCompat_InExpansionAfterPlainPlaceholder 生产缺陷回归（0.8.1 首版）：
+// "type_code = ? AND value IN ?" 中 IN 前还有普通 ?，首版只扫描 IN 占位符
+// 导致参数索引错位（IN 绑定到前一个参数，切片原样绑定为 $2 → PG 42601）。
+func TestXormCompat_InExpansionAfterPlainPlaceholder(t *testing.T) {
+	drv := newXormTestDriverWithModel(t)
+	q := drv.Query()
+	for _, id := range []string{"m1", "m2", "m3"} {
+		name := map[string]string{"m1": "a", "m2": "b", "m3": "a"}[id]
+		if err := q.Create(&XormTestModel{ID: id, Name: name}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	// 报告同款：普通 ? 在前 + IN ? 在后
+	var rows []XormTestModel
+	if err := q.Model(&XormTestModel{}).
+		Where("name = ? AND id IN ?", "a", []string{"m1", "m3"}).Find(&rows); err != nil {
+		t.Fatalf("普通 ? + IN ?: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("期望命中 2 行, 实际 %d", len(rows))
+	}
+
+	// IN (?) 括号形态混在中间：IN (?) + 尾部普通 ?
+	rows = nil
+	if err := q.Model(&XormTestModel{}).
+		Where("id IN (?) AND name = ?", []string{"m1", "m2"}, "b").Find(&rows); err != nil {
+		t.Fatalf("IN (?) + 尾部普通 ?: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "m2" {
+		t.Errorf("期望命中 m2, 实际 %+v", rows)
+	}
+
+	// 双 IN：两个切片各自展开
+	rows = nil
+	if err := q.Model(&XormTestModel{}).
+		Where("id IN ? AND name IN ?", []string{"m1"}, []string{"a", "b"}).Find(&rows); err != nil {
+		t.Fatalf("双 IN: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "m1" {
+		t.Errorf("双 IN 期望命中 m1, 实际 %+v", rows)
+	}
+
+	// 前置普通 ? 的空切片：IN (NULL) 恒假
+	rows = nil
+	if err := q.Model(&XormTestModel{}).
+		Where("name = ? AND id IN ?", "a", []string{}).Find(&rows); err != nil {
+		t.Fatalf("前置普通 ? 的空切片: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("空切片期望 0 行, 实际 %d", len(rows))
+	}
+}
+
 // ── X-06：Count 剥离链上 ORDER BY ────────────────────────────────────
 
 func TestXormCompat_CountStripsOrder(t *testing.T) {
