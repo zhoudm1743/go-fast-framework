@@ -1,12 +1,39 @@
 package contracts
 
 import (
+	"errors"
 	"html/template"
 	"io"
 	"io/fs"
 	"net/http"
 	"time"
 )
+
+// ── 响应已发送哨兵（Response 双写根治，X-响应双写报告 2026-08-28）─────────
+
+// ErrResponseSent 表示响应已成功写出的哨兵错误。
+// Response 的写出方法（Build/Success/Fail/NotFound/Unauthorized 等）在成功
+// 发送响应后返回它，替代此前"写出后返回 nil"的语义：
+//
+//	func (c *X) findOrder(ctx Context, id string) error {
+//	    if err := q.First(&o, "id = ?", id); err != nil {
+//	        return ctx.Response().NotFound("订单不存在") // 写出 404，返回哨兵
+//	    }
+//	    return nil
+//	}
+//	// 调用方
+//	if err := c.findOrder(ctx, id); err != nil { return err } // 框架识别哨兵，不再二次写响应
+//
+// 框架路由层识别该哨兵时不再渲染错误响应、直接结束本次请求；业务方可用
+// IsResponseSent(err) 区分"已响应"与真实错误。
+// 注意：表达式 `if err := resp.Fail(...); err != nil` 现在恒为真（哨兵非 nil），
+// 需要用 IsResponseSent 判别而非把哨兵当错误处理。
+var ErrResponseSent = errors.New("response already sent")
+
+// IsResponseSent 判断 err 是否为（或包装了）ErrResponseSent。
+func IsResponseSent(err error) bool {
+	return errors.Is(err, ErrResponseSent)
+}
 
 // HandlerFunc 是 GoFast HTTP 处理函数的统一签名。
 // 应用层代码只需依赖此类型，无需引入任何底层 HTTP 框架包。

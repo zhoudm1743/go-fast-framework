@@ -2,6 +2,7 @@ package fiber
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -279,7 +280,18 @@ func (r *route) StaticSPA(prefix string, fsys fs.FS, root string) contracts.Rout
 // wrap 将 contracts.HandlerFunc 转为 Fiber handler。
 func (r *route) wrap(h contracts.HandlerFunc) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		return h(NewContext(c, r.validator, r.storage, r.viewEngine))
+		err := h(NewContext(c, r.validator, r.storage, r.viewEngine))
+		if err == nil {
+			return nil
+		}
+		// 响应已写出（哨兵 ErrResponseSent）：必须以 nil 结束请求。
+		// 若把哨兵原样交给 fiber，默认错误处理会对“已写出的响应”再追加一段
+		// 500 文本，造成响应体拼接（响应双写缺陷的路由层根治点）。
+		if errors.Is(err, contracts.ErrResponseSent) {
+			return nil
+		}
+		// 其余错误原样上抛，走 fiber 错误处理路径（保持现状）。
+		return err
 	}
 }
 

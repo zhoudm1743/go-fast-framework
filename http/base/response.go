@@ -30,11 +30,21 @@ func NewResponse(ctx contracts.Context) *Response {
 }
 
 // Build 构建并发送完整响应。
+//
+// 语义变更（响应双写根治）：发送成功返回哨兵 contracts.ErrResponseSent 而非 nil。
+// 此前“写出成功返回 nil”导致 `if err := resp.NotFound(...); err != nil` 形式的
+// 业务封装误判为“未响应”，调用方继续执行又写一次响应，最终响应体出现两段拼接
+// JSON。返回哨兵后，调用方把哨兵以 error 上抛，路由层（fiber/gin 的 wrap）识别
+// 到哨兵即结束请求、不再二次渲染；业务方可用 contracts.IsResponseSent 区分
+// “已响应”与真实错误。发送失败返回底层真实错误（不吞错、不包哨兵）。
 func (r *Response) Build(status int, code int, message string, data any) error {
 	r.Code = code
 	r.Message = message
 	r.Data = data
-	return r.ctx.JSON(status, r)
+	if err := r.ctx.JSON(status, r); err != nil {
+		return err // 底层写失败是真实错误，原样上抛
+	}
+	return contracts.ErrResponseSent // 成功写出 → 哨兵，路由层据此结束请求
 }
 
 // Json 快速返回任意 JSON 响应（业务码固定为 0）。
@@ -47,11 +57,17 @@ func (r *Response) Json(status int, data any, message ...string) error {
 }
 
 // String 快速返回纯文本响应（HTTP 200）。
+// 与 Build 一致：成功返回 ErrResponseSent 哨兵，失败返回底层错误。
 func (r *Response) String(s string) error {
-	return r.ctx.String(http.StatusOK, s)
+	if err := r.ctx.String(http.StatusOK, s); err != nil {
+		return err
+	}
+	return contracts.ErrResponseSent
 }
 
 // File 直接输出存储中的文件内容，默认使用 storage 默认磁盘。
+// 内部的 r.Fail / r.NotFound 写出响应后返回哨兵，会自然向上传播，无需重复包装；
+// SendFile 成功同样返回哨兵，失败返回底层错误。
 func (r *Response) File(file string, disk ...string) error {
 	storage := r.ctx.Storage()
 	if storage == nil {
@@ -71,10 +87,15 @@ func (r *Response) File(file string, disk ...string) error {
 		r.ctx.SetHeader("Content-Type", mime)
 	}
 
-	return r.ctx.SendFile(driver.Path(file))
+	if err := r.ctx.SendFile(driver.Path(file)); err != nil {
+		return err
+	}
+	return contracts.ErrResponseSent
 }
 
 // Download 以附件下载方式输出文件，可自定义下载文件名。
+// 内部的 r.Fail / r.NotFound 写出响应后返回哨兵，会自然向上传播，无需重复包装；
+// SendFile 成功同样返回哨兵，失败返回底层错误。
 func (r *Response) Download(file string, name string, disk ...string) error {
 	storage := r.ctx.Storage()
 	if storage == nil {
@@ -98,7 +119,10 @@ func (r *Response) Download(file string, name string, disk ...string) error {
 	if mime, err := driver.MimeType(file); err == nil && mime != "" {
 		r.ctx.SetHeader("Content-Type", mime)
 	}
-	return r.ctx.SendFile(driver.Path(file))
+	if err := r.ctx.SendFile(driver.Path(file)); err != nil {
+		return err
+	}
+	return contracts.ErrResponseSent
 }
 
 // Success 快速返回成功响应（HTTP 200, code=0）。
@@ -185,18 +209,25 @@ func (r *Response) Paginate(list any, total int64, page int, size int, message .
 }
 
 // Write 写入原始字节到响应体。
+// 与 Build 一致：成功返回 ErrResponseSent 哨兵，失败返回底层错误。
 func (r *Response) Write(data []byte) error {
-	return r.ctx.String(http.StatusOK, string(data))
+	if err := r.ctx.String(http.StatusOK, string(data)); err != nil {
+		return err
+	}
+	return contracts.ErrResponseSent
 }
 
 // View 渲染 HTML 模板并发送 HTTP 200 响应。
 // name 为相对于模板目录的路径，例如 "home/index.html"。
+// 与 Build 一致：成功返回 ErrResponseSent 哨兵，失败返回底层错误。
 func (r *Response) View(name string, data any) error {
-	return r.ctx.HTML(http.StatusOK, name, data)
+	if err := r.ctx.HTML(http.StatusOK, name, data); err != nil {
+		return err
+	}
+	return contracts.ErrResponseSent
 }
 
 // Errorf 便于把格式化错误快速传递给上层调用。
 func Errorf(format string, args ...any) error {
 	return fmt.Errorf(format, args...)
 }
-

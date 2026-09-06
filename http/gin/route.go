@@ -2,6 +2,7 @@ package gin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -302,6 +303,15 @@ func (r *route) StaticSPA(prefix string, fsys fs.FS, root string) contracts.Rout
 func (r *route) wrap(h contracts.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		err := h(NewContext(c, r.validator, r.storage, r.viewEngine))
+
+		// 响应已写出（哨兵 ErrResponseSent）：直接中断链结束请求。
+		// 哨兵不是错误，不记 c.Error 日志；更不能落到下方“补 500”分支——
+		// 那会对已就绪的响应二次写入，造成响应体拼接（响应双写缺陷的路由层根治点）。
+		if errors.Is(err, contracts.ErrResponseSent) {
+			c.Abort()
+			return
+		}
+
 		if err != nil {
 			_ = c.Error(err)
 		}

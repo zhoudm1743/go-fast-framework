@@ -120,6 +120,47 @@ if err := ctx.Bind(&req); err != nil {
 
 ---
 
+## HTTP 响应哨兵与双写规避
+
+`ctx.Response()` 的所有写出方法（`Build` / `Json` / `String` / `Success` / `Fail` / `Created` / `Unauthorized` / `Forbidden` / `NotFound` / `Validation` / `Paginate` / `View` 等）在**成功发送响应后返回哨兵错误** `contracts.ErrResponseSent`，而不是 `nil`。框架路由层识别到该哨兵后会直接结束本次请求、不再渲染错误响应，从根源上避免"同一请求写两次响应"。
+
+**推荐写法**：helper / 私有方法中直接把写出方法的返回值作为 error 向上返回，哨兵会随调用链传播并由框架处理：
+
+```go
+func (c *OrderController) Show(ctx contracts.Context) error {
+    var o Order
+    if err := db.First(&o, "id = ?", ctx.Param("id")); err != nil {
+        return ctx.Response().NotFound("订单不存在") // 写出 404，返回哨兵
+    }
+    return ctx.Response().Success(o)
+}
+```
+
+**判别已响应**：需要区分"响应已发出"与真实错误时，使用 `contracts.IsResponseSent(err)`：
+
+```go
+if err := ctx.Response().Fail(500, "boom"); err != nil && !contracts.IsResponseSent(err) {
+    // 仅处理真实错误（写出失败等）；哨兵表示响应已成功发出，无需再处理
+    facades.Log().Error("响应写出失败: " + err.Error())
+}
+```
+
+**升级注意**：此前"写出成功返回 nil"的语义已变更为返回哨兵。形如下方的旧代码现在恒为真（哨兵非 nil），若错误分支里会再次写响应或把 err 当真实错误记录，必须改用 `IsResponseSent` 判别：
+
+```go
+// 旧写法（升级后恒进入分支，可能造成双写或误导性错误日志）：
+if err := resp.Fail(403, "无权限"); err != nil {
+    return resp.Fail(500, "发送失败") // ❌ 哨兵非 nil 会走到这里，造成双写
+}
+
+// 正确写法：
+if err := resp.Fail(403, "无权限"); err != nil && !contracts.IsResponseSent(err) {
+    return err // 仅真实写出错误向上传播
+}
+```
+
+---
+
 ## HTTP 服务配置
 
 以下配置均为可选项，写入 `config/config.yaml` 即可生效（Gin / Fiber 双引擎行为一致）：
