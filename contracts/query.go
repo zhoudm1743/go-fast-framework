@@ -175,6 +175,11 @@ type Query interface {
 	Save(value any) error
 	// Update/Updates 的列值支持 contracts.Expr 表达式（跨驱动，X-08）：
 	// Update("count", Expr("count + ?", 1)) 生成 "SET count = count + ?" 原子表达式
+	//
+	// 跨驱动统一语义（X-09）：链上 Model(&bean) 且 bean 主键含非零值时，
+	// 主键等值条件自动并入更新（与链上 Where 取 AND 交集），与 GORM v2 一致。
+	// 主键全零 / 无主键 / 仅 Table() 时不附加条件，更新范围完全由链上 Where
+	// 决定——链上无 Where 即为全表更新，批量写请务必显式 Where。
 	Update(column string, value any) error
 	Updates(values any) error
 	Delete(value any, conds ...any) error
