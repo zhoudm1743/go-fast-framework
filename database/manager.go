@@ -98,6 +98,7 @@ func (m *dbManager) readConnectionConfig(prefix string) ConnectionConfig {
 		SSLMode:         m.cfg.GetString(prefix + ".ssl_mode"),
 		TablePrefix:     m.cfg.GetString(prefix + ".table_prefix"),
 		Naming:          m.cfg.GetString(prefix + ".naming"),
+		TagIdentifier:   m.cfg.GetString(prefix + ".tag_identifier"),
 		MaxIdleConns:    m.cfg.GetInt(prefix+".max_idle_conns", 0),
 		MaxOpenConns:    m.cfg.GetInt(prefix+".max_open_conns", 0),
 		ConnMaxLifetime: m.cfg.GetInt(prefix+".conn_max_lifetime", 0),
