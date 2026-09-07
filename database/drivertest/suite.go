@@ -26,15 +26,13 @@ type QueryCounter interface {
 }
 
 // RunSuite 一致性套件入口（§11.1 子测试结构）。本轮实现核心子集
-// CRUD/Preload/Advanced/Expr/Transaction/SoftDelete/QueryCache/Hooks/Errors/
-// OrmTag/DDL；Joins/Lock 整组注册为 Skip（见各 TODO 注释指明文档章节）。
+// CRUD/Aggregate（§11.3 聚合）/Joins（§11.4）/Preload/Advanced/Expr/Transaction/
+// SoftDelete/QueryCache/Hooks/Errors/OrmTag/DDL；Lock 整组注册为 Skip
+// （见 suiteLock 注释指明文档章节）。
 func RunSuite(t *testing.T, f Factory) {
 	t.Run("CRUD", func(t *testing.T) { suiteCRUD(t, f) })
-	t.Run("Joins", func(t *testing.T) {
-		// TODO(11.4)：Joins 矩阵待实现（INNER/LEFT/RIGHT/带参 ON/自连接/非法
-		// JOIN 串 ErrUnsupported/Schema 前缀，见 orm-tag-design.md §11.4）
-		t.Skip("TODO(11.4)：Joins 矩阵见 orm-tag-design.md §11.4，本轮未纳入")
-	})
+	t.Run("Aggregate", func(t *testing.T) { suiteAggregate(t, f) }) // §11.3 聚合（方案 §六 第 6 项 AGG-01~05 SQLite 子集）
+	t.Run("Joins", func(t *testing.T) { suiteJoins(t, f) })         // §11.4 Joins（方案 §六 第 7 项 Q-08 SQLite 子集）
 	t.Run("Preload", func(t *testing.T) { suitePreload(t, f) })
 	t.Run("Advanced", func(t *testing.T) { suiteAdvanced(t, f) }) // §11.6
 	t.Run("Expr", func(t *testing.T) { suiteExpr(t, f) })         // §11.7

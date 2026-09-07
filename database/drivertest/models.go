@@ -433,6 +433,24 @@ func (n *SuiteNamedCol) AutoGenerateID() {
 	}
 }
 
+// SuiteAgg 聚合组种子模型（§11.3 聚合一致性 / 双驱动测试方案 §六 AGG-01~05
+// SQLite 子集）：category 分组列 + amount 数值列，种子数据形态与驱动侧 fullcov
+// 基准一致（6 行 / 总和 180 / 均值 30 / 最大 100 / 最小 5；分组 a:3、b:2、c:1，
+// 各组和 a:60、b:20、c:100）。
+type SuiteAgg struct {
+	ID       string `orm:"pk varchar(16) 'id'"`
+	Category string `orm:"varchar(16) 'category'"`
+	Amount   int    `orm:"'amount' default(0)"`
+}
+
+func (SuiteAgg) TableName() string { return "suite_aggs" }
+
+func (a *SuiteAgg) AutoGenerateID() {
+	if a.ID == "" {
+		a.ID = newSuiteID()
+	}
+}
+
 // SuiteBrokenRel 错误路径模型：rel 外键字段不存在（§11.5/§11.14：两方向均不成立
 // → ErrUnsupported 包装，信息含模型名与字段名）。gorm:"- 保证 gorm Parse 可过，
 // 错误统一由共享引擎前置校验产生。
