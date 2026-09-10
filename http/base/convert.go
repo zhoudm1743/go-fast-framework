@@ -6,13 +6,18 @@ import (
 	"github.com/zhoudm1743/go-fast-framework/utils"
 )
 
-// SetFieldFromString 将字符串写入反射字段（支持基础类型及自定义底层类型）。
-// 数值类型解析失败时不修改字段；字符串类型不做 Trim。
+// SetFieldFromString 将字符串写入反射字段（支持基础类型、指针及自定义底层类型）。
+// 数值类型解析失败时不修改字段；字符串类型不做 Trim；指针为零值时先分配再递归写入。
 func SetFieldFromString(fv reflect.Value, val string) {
 	if !fv.CanSet() {
 		return
 	}
 	switch fv.Kind() {
+	case reflect.Ptr:
+		if fv.IsNil() {
+			fv.Set(reflect.New(fv.Type().Elem()))
+		}
+		SetFieldFromString(fv.Elem(), val)
 	case reflect.String:
 		fv.SetString(val)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:

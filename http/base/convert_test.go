@@ -16,6 +16,8 @@ type convertTarget struct {
 	F  customFloat
 	B  customBool
 	S  string
+	PI *int8
+	PS *string
 }
 
 func TestSetFieldFromString(t *testing.T) {
@@ -45,6 +47,16 @@ func TestSetFieldFromString(t *testing.T) {
 	SetFieldFromString(rv.FieldByName("S"), " hello ")
 	if target.S != " hello " {
 		t.Fatalf("string 不应 Trim，实际 %q", target.S)
+	}
+
+	// 指针字段：零值分配后递归写入（query 绑定 *int8 等过滤器依赖此路径）
+	SetFieldFromString(rv.FieldByName("PI"), "3")
+	if target.PI == nil || *target.PI != 3 {
+		t.Fatalf("*int8 期望指向 3，实际 %+v", target.PI)
+	}
+	SetFieldFromString(rv.FieldByName("PS"), "ok")
+	if target.PS == nil || *target.PS != "ok" {
+		t.Fatalf("*string 期望指向 ok，实际 %+v", target.PS)
 	}
 
 	SetFieldFromString(rv.FieldByName("I"), " 99 ")
