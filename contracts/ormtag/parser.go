@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ── SQL 类型白名单 ────────────────────────────────────────────────────────
@@ -297,10 +298,10 @@ func parseFieldTag(fieldName, tagStr string) (FieldMeta, error) {
 			meta.Created = true
 		case "UPDATED":
 			meta.Updated = true
-		case "DELETED": // 禁用（文档 4.4）：xorm 原生软删除与框架业务级软删除冲突
+		case "DELETED": // 禁用（文档 4.4）：xorm 原生软删除与框架软删除冲突
 			return meta, fieldErr(fieldName, tagStr,
-				`禁用 token "deleted"（xorm 原生软删除与框架业务级软删除 OnlyTrashed/Restore/ForceDelete 语义冲突）；`+
-					`替代方案：移除该 token，使用框架软删除（deleted_at 列仅声明 'deleted_at' index default(0)）`)
+				`禁用 token "deleted"（xorm 原生软删除与框架软删除 OnlyTrashed/Restore/ForceDelete 语义冲突）；`+
+					`替代方案：移除该 token，列仅声明 'deleted_at' index default(0) 并加 sd 标记（如 sd:"" / sd:"milli" / sd:"time"）启用框架托管软删`)
 		case "VERSION":
 			meta.Version = true
 		case "UTC":
@@ -350,6 +351,36 @@ func fieldErr(fieldName, tagStr, msg string) error {
 	return fmt.Errorf("ormtag: 字段 %q 的 orm tag %q: %s", fieldName, tagStr, msg)
 }
 
+// parseSdTag 解析 sd tag（框架托管软删标记，文档 §4.5）：值为模式名，空值
+// 归一为 sec；未知模式、模式与字段 Go 类型不匹配均报错（信息含字段名与原文）。
+func parseSdTag(fieldName, tag string, fieldType reflect.Type, fieldIndex []int) (SdMeta, error) {
+	mode := SdMode(strings.ToLower(strings.TrimSpace(tag)))
+	if mode == "" {
+		mode = SdModeSec
+	}
+	switch mode {
+	case SdModeSec, SdModeMilli, SdModeNano, SdModeFlag, SdModeTime:
+	default:
+		return SdMeta{}, fmt.Errorf("ormtag: 字段 %q 的 sd tag %q: 未知软删模式（支持 sec/milli/nano/flag/time，空值为 sec）", fieldName, tag)
+	}
+	deref := fieldType
+	for deref.Kind() == reflect.Ptr {
+		deref = deref.Elem()
+	}
+	timeBased := deref == reflect.TypeOf(time.Time{})
+	intBased := deref.Kind() >= reflect.Int && deref.Kind() <= reflect.Int64 ||
+		deref.Kind() >= reflect.Uint && deref.Kind() <= reflect.Uint64
+	switch {
+	case mode == SdModeTime && !timeBased:
+		return SdMeta{}, fmt.Errorf("ormtag: 字段 %q 的 sd tag %q: time 模式要求 time.Time/*time.Time 类型，实际 %s", fieldName, tag, fieldType)
+	case mode != SdModeTime && timeBased:
+		return SdMeta{}, fmt.Errorf("ormtag: 字段 %q 的 sd tag %q: %s 模式要求整数类型（时间型字段请用 sd:\"time\"）", fieldName, tag, mode)
+	case mode != SdModeTime && !intBased:
+		return SdMeta{}, fmt.Errorf("ormtag: 字段 %q 的 sd tag %q: %s 模式要求整数类型，实际 %s", fieldName, tag, mode, fieldType)
+	}
+	return SdMeta{Mode: mode, FieldIndex: fieldIndex, TimeBased: timeBased}, nil
+}
+
 // ParseField 解析单个字段的 orm tag（尽力解析，不返回错误）。
 // 命中禁用 token/未知裸 token/非法语法时返回已解析部分（RawTag 保留原文供定位）。
 func ParseField(field reflect.StructField) FieldMeta {
@@ -383,6 +414,7 @@ func Parse(model any) (*ModelMeta, error) {
 		Type: t,
 		Rels: make(map[string]RelMeta),
 		Exts: make(map[string]ExtMeta),
+		Sd:   make(map[string]SdMeta),
 	}
 	if err := collectFields(t, nil, "", meta, map[reflect.Type]bool{t: true}); err != nil {
 		return nil, err
@@ -494,6 +526,15 @@ func collectFields(t reflect.Type, path []int, prefix string, meta *ModelMeta, v
 				return err
 			}
 			meta.Exts[sf.Name] = em
+		}
+
+		// sd tag（框架托管软删标记；与 orm tag 无关，含嵌入展开叶子字段）
+		if sdTag, ok := sf.Tag.Lookup("sd"); ok {
+			sm, err := parseSdTag(sf.Name, sdTag, sf.Type, fieldPath)
+			if err != nil {
+				return err
+			}
+			meta.Sd[sf.Name] = sm
 		}
 	}
 	return nil

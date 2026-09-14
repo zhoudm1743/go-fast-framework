@@ -22,6 +22,7 @@ package drivertest
 import (
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 )
@@ -252,6 +253,9 @@ type SuitePhoto struct {
 	OwnerID   string `orm:"varchar(16) 'owner_id'"`
 	OwnerType string `orm:"varchar(32) 'owner_type'"`
 	URL       string `orm:"varchar(255) 'url'"`
+	// 业务级软删列（§11.9）：SuiteOrder.Photos / SuiteUser.Photos / SuiteRole.Photos
+	// 均走共享引擎（gorm:"-"），引擎对 int64 deleted_at 子表自动过滤。
+	DeletedAt int64 `orm:"'deleted_at' index default(0)"`
 }
 
 func (SuitePhoto) TableName() string { return "suite_photos" }
@@ -506,4 +510,146 @@ func newSuiteID() string {
 		id += "0"
 	}
 	return id[:16]
+}
+
+// ── 框架托管软删模型组（sd tag，§4.5/§11.9）────────────────────────────
+//
+// 五种值模式（sec/milli/nano/flag/time）+ 嵌套嵌入 + Preload 自动过滤。
+// Delete 由驱动自动改写为置位 UPDATE、默认查询自动过滤存活行（与 gorm 风格
+// 一致）；无 sd 标记的 deleted_at 模型（SuiteSoftDel/SuitePhoto 等）保持
+// 旧版业务级手动语义，见 suiteSoftDelete  legacy 组。
+
+// SuiteSdSec 秒级（sd 缺省模式）：deleted_at 为 int64 Unix 秒，0=存活。
+type SuiteSdSec struct {
+	ID        string `orm:"pk varchar(16) 'id'"`
+	Name      string `orm:"varchar(64) 'name'"`
+	DeletedAt int64  `orm:"'deleted_at' index default(0)" sd:""`
+}
+
+func (SuiteSdSec) TableName() string { return "suite_sd_secs" }
+
+func (m *SuiteSdSec) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+// SuiteSdMilli 毫秒级：deleted_at 为 int64 Unix 毫秒，0=存活。
+type SuiteSdMilli struct {
+	ID        string `orm:"pk varchar(16) 'id'"`
+	Name      string `orm:"varchar(64) 'name'"`
+	DeletedAt int64  `orm:"'deleted_at' index default(0)" sd:"milli"`
+}
+
+func (SuiteSdMilli) TableName() string { return "suite_sd_millis" }
+
+func (m *SuiteSdMilli) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+// SuiteSdNano 纳秒级：deleted_at 为 int64 Unix 纳秒，0=存活。
+type SuiteSdNano struct {
+	ID        string `orm:"pk varchar(16) 'id'"`
+	Name      string `orm:"varchar(64) 'name'"`
+	DeletedAt int64  `orm:"'deleted_at' index default(0)" sd:"nano"`
+}
+
+func (SuiteSdNano) TableName() string { return "suite_sd_nanos" }
+
+func (m *SuiteSdNano) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+// SuiteSdFlag 0/1 标记：存活 0、删除写 1。
+type SuiteSdFlag struct {
+	ID        string `orm:"pk varchar(16) 'id'"`
+	Name      string `orm:"varchar(64) 'name'"`
+	DeletedAt int64  `orm:"'deleted_at' index default(0)" sd:"flag"`
+}
+
+func (SuiteSdFlag) TableName() string { return "suite_sd_flags" }
+
+func (m *SuiteSdFlag) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+// SuiteSdTime 时间戳 NULL 语义：NULL=存活、删除写当前时间。
+type SuiteSdTime struct {
+	ID        string     `orm:"pk varchar(16) 'id'"`
+	Name      string     `orm:"varchar(64) 'name'"`
+	DeletedAt *time.Time `orm:"'deleted_at' index null" sd:"time"`
+}
+
+func (SuiteSdTime) TableName() string { return "suite_sd_times" }
+
+func (m *SuiteSdTime) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+// SuiteSdNestInner / Mid / Nest：嵌套匿名嵌入（extends 套 extends）的 sd
+// 模型，锁定双驱动嵌入展开列名解析——gorm FieldsByName 提升、xorm FieldName
+// 点分全路径（"SuiteSdNestMid.SuiteSdNestInner.DeletedAt"）后缀匹配。
+type SuiteSdNestInner struct {
+	Name      string `orm:"varchar(64) 'name'"`
+	DeletedAt int64  `orm:"'deleted_at' index default(0)" sd:""`
+}
+
+type SuiteSdNestMid struct {
+	ID               string `orm:"pk varchar(16) 'id'"`
+	CreatedAt        int64  `orm:"created 'created_at'"`
+	SuiteSdNestInner `orm:"extends"`
+}
+
+type SuiteSdNest struct {
+	SuiteSdNestMid `orm:"extends"`
+	Extra          string `orm:"varchar(64) 'extra' null"`
+}
+
+func (SuiteSdNest) TableName() string { return "suite_sd_nests" }
+
+func (m *SuiteSdNest) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+// SuiteSdOrder / SuiteSdPhoto：sd + Preload 自动过滤（§11.9「软删除模型 +
+// Preload」）。子表 time 模式强制走 IS NULL 条件路径——若引擎/驱动错误生成
+// deleted_at = 0，NULL 列下全部存活行会被过滤掉，用例立即失败。
+type SuiteSdOrder struct {
+	ID        string         `orm:"pk varchar(16) 'id'"`
+	Name      string         `orm:"varchar(64) 'name'"`
+	DeletedAt int64          `orm:"'deleted_at' index default(0)" sd:""`
+	Photos    []SuiteSdPhoto `orm:"-" gorm:"-" rel:"foreignKey:OrderID;references:ID"`
+}
+
+func (SuiteSdOrder) TableName() string { return "suite_sd_orders" }
+
+func (m *SuiteSdOrder) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
+}
+
+type SuiteSdPhoto struct {
+	ID        string     `orm:"pk varchar(16) 'id'"`
+	OrderID   string     `orm:"varchar(16) 'order_id' index"`
+	URL       string     `orm:"varchar(255) 'url'"`
+	DeletedAt *time.Time `orm:"'deleted_at' index null" sd:"time"`
+}
+
+func (SuiteSdPhoto) TableName() string { return "suite_sd_photos" }
+
+func (m *SuiteSdPhoto) AutoGenerateID() {
+	if m.ID == "" {
+		m.ID = newSuiteID()
+	}
 }

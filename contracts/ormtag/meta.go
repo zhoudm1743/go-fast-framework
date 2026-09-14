@@ -14,7 +14,10 @@
 //     来源见 parser.go sqlTypeWhitelist 注释）。
 package ormtag
 
-import "reflect"
+import (
+	"reflect"
+	"time"
+)
 
 // FieldMeta 单个字段的统一元数据（orm tag 解析产物，覆盖 xorm 全量 token）。
 //
@@ -95,10 +98,85 @@ type ExtMeta struct {
 	UnknownKeys []string
 }
 
+// SdMode 软删值模式（sd tag 值；空值归一为 sec）。
+type SdMode string
+
+const (
+	// SdModeSec 缺省：int64 Unix 秒（0=存活，删除写 Unix 秒）。
+	SdModeSec SdMode = "sec"
+	// SdModeMilli int64 Unix 毫秒。
+	SdModeMilli SdMode = "milli"
+	// SdModeNano int64 Unix 纳秒。
+	SdModeNano SdMode = "nano"
+	// SdModeFlag 0/1 标记（存活 0，删除写 1）。
+	SdModeFlag SdMode = "flag"
+	// SdModeTime 时间戳 NULL 语义（NULL=存活，删除写当前时间）。
+	SdModeTime SdMode = "time"
+)
+
+// SdMeta 框架托管软删元数据（sd tag 解析产物）。
+// 带 sd 标记的模型由框架自动软删：Delete 改写为置位 UPDATE、默认查询自动过滤
+// 存活行、Unscoped 绕过、OnlyTrashed/Restore 类型感知（双驱动一致，文档 §11.9）。
+// 模式与字段 Go 类型匹配校验在解析期完成：sec/milli/nano/flag 要求整数类型，
+// time 要求 time.Time/*time.Time。
+type SdMeta struct {
+	Mode       SdMode // 软删值模式
+	FieldIndex []int  // 反射索引路径（含嵌入展开，与 FieldMeta.FieldIndex 同规则）
+	TimeBased  bool   // Go 类型为 time.Time/*time.Time（time 模式恒 true）
+}
+
+// AliveCond 存活行过滤条件（contracts.Query.Where 直用）：time 模式 IS NULL，
+// 其余模式 = 0。
+func (m SdMeta) AliveCond(column string) (string, []any) {
+	if m.TimeBased {
+		return column + " IS NULL", nil
+	}
+	return column + " = ?", []any{int64(0)}
+}
+
+// TrashedCond 已删行过滤条件（OnlyTrashed）：time 模式 IS NOT NULL、flag 模式
+// = 1、其余 <> 0。
+func (m SdMeta) TrashedCond(column string) (string, []any) {
+	switch {
+	case m.TimeBased:
+		return column + " IS NOT NULL", nil
+	case m.Mode == SdModeFlag:
+		return column + " = ?", []any{int64(1)}
+	default:
+		return column + " <> ?", []any{int64(0)}
+	}
+}
+
+// AliveValue Restore 恢复写入值：time 模式 NULL，其余 0。
+func (m SdMeta) AliveValue() any {
+	if m.TimeBased {
+		return nil
+	}
+	return int64(0)
+}
+
+// DeletedValue 软删写入值（Delete 自动改写/业务置位）：sec=Unix 秒、milli=
+// 毫秒、nano=纳秒、flag=1、time=当前时间。
+func (m SdMeta) DeletedValue(now time.Time) any {
+	switch m.Mode {
+	case SdModeMilli:
+		return now.UnixMilli()
+	case SdModeNano:
+		return now.UnixNano()
+	case SdModeFlag:
+		return int64(1)
+	case SdModeTime:
+		return now
+	default:
+		return now.Unix()
+	}
+}
+
 // ModelMeta 模型级元数据（Parse 产物，按 reflect.Type 缓存）。
 type ModelMeta struct {
 	Type   reflect.Type
 	Fields []FieldMeta        // 仅含打了 orm tag 的字段（含匿名嵌入/extends 展开后的叶子字段与嵌入标记条目）
 	Rels   map[string]RelMeta // 关联字段名 → 关联元数据（rel tag 或 gorm tag 兼容读取，文档 5.3）
 	Exts   map[string]ExtMeta // 字段名 → 扩展元数据（ext tag）
+	Sd     map[string]SdMeta  // 字段名 → 软删元数据（sd tag；与 orm tag 无关，含嵌入展开叶子）
 }

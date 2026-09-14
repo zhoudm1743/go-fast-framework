@@ -17,7 +17,12 @@
 //  7. many2many 两跳：先查中间表映射行，再以引用键集 IN 查子表按映射回填；
 //     中间表模型无需业务定义（引擎直接构造表级子查询）；
 //  8. polymorphic：子查询追加类型列 = PolyValue 条件，缺省值取父表名；
-//  9. 引擎对中间表只读（关联管理不写中间表）。
+//  9. 引擎对中间表只读（关联管理不写中间表）；
+//  10. 业务级软删自动过滤：子模型带 int64 deleted_at 列（0=存活）时子查询
+//     自动 AND deleted_at = 0（§11.9「软删除模型 + Preload」，双驱动一致）；
+//     sd tag 模型（框架托管软删）经 SoftDeleteCondResolver 类型感知（time
+//     模式 IS NULL）；驱动原生软删形态（gorm.DeletedAt / xorm deleted tag）
+//     由驱动自身过滤。
 package preload
 
 import (
@@ -43,6 +48,20 @@ type MetaAdapter interface {
 	ColumnOfField(modelType reflect.Type, fieldName string) (string, bool)
 	// HasColumn 列名是否存在于模型对应表中。
 	HasColumn(modelType reflect.Type, columnName string) bool
+	// SoftDeleteColumn 业务级软删列（int64 deleted_at 约定，0=存活）的列名；
+	// ok=false 表示无业务级软删列——含驱动原生软删形态（gorm.DeletedAt /
+	// xorm deleted tag，其过滤由驱动自身在类型化查询上追加，引擎不重复添加）。
+	SoftDeleteColumn(modelType reflect.Type) (column string, ok bool)
+}
+
+// SoftDeleteCondResolver（可选接口，MetaAdapter 可实现）：sd tag 模型（框架
+// 托管软删）的类型感知存活条件。引擎检测到实现时优先于 SoftDeleteColumn——
+// time 模式须 IS NULL（= 0 会把存活行全部过滤掉），整数模式 = 0 与旧约定一致。
+// 未实现时回退 SoftDeleteColumn 的 int64 约定。
+type SoftDeleteCondResolver interface {
+	// SoftDeleteCond 返回子查询应 AND 的存活条件（cond 可直接交 Where）。
+	// ok=false 表示非 sd 模型，回退 SoftDeleteColumn。
+	SoftDeleteCond(modelType reflect.Type) (cond string, args []any, ok bool)
 }
 
 // Engine 共享 Preload 引擎。
@@ -267,6 +286,7 @@ func (e *Engine) loadChildren(table string, queryCols []string, parentTuples [][
 			ids = append(ids, t[0])
 		}
 		q := e.NewQuery().Table(table).Where(queryCols[0]+" IN ?", ids)
+		q = e.softDeleteScope(q, rel.ChildType)
 		q, err := e.applyChildTail(q, rel, sp)
 		if err != nil {
 			return children, err
@@ -291,6 +311,7 @@ func (e *Engine) loadChildren(table string, queryCols []string, parentTuples [][
 			args = append(args, t...)
 		}
 		q := e.NewQuery().Table(table).Where("("+strings.Join(queryCols, ", ")+") IN ("+phs+")", args...)
+		q = e.softDeleteScope(q, rel.ChildType)
 		q, err := e.applyChildTail(q, rel, sp)
 		if err != nil {
 			return children, err
@@ -354,6 +375,23 @@ func selectColumns(groups ...[]string) (string, []any) {
 		rest = append(rest, c)
 	}
 	return all[0], rest
+}
+
+// softDeleteScope 业务级软删自动过滤（契约 10）：sd tag 模型经
+// SoftDeleteCondResolver 类型感知（time 模式 IS NULL，整数模式 = 0）；
+// 未实现解析器时回退 int64 deleted_at 约定（0=存活）AND deleted_at = 0。
+// 条件置于 IN 条件之后、conds/callbacks 之前（AND 语义，顺序无关）。
+// 驱动原生软删形态由 Meta 返回 ok=false 跳过。
+func (e *Engine) softDeleteScope(q contracts.Query, childType reflect.Type) contracts.Query {
+	if r, ok := e.Meta.(SoftDeleteCondResolver); ok {
+		if cond, args, hit := r.SoftDeleteCond(childType); hit {
+			return q.Where(cond, args...)
+		}
+	}
+	if col, ok := e.Meta.SoftDeleteColumn(childType); ok {
+		q = q.Where(col+" = ?", 0)
+	}
+	return q
 }
 
 // applyChildTail 在子查询上依次应用 polymorphic 类型列条件（契约 8）、conds

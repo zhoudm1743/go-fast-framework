@@ -1,6 +1,8 @@
 package database
 
 import (
+	"time"
+
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 	"github.com/zhoudm1743/go-fast-framework/id"
 )
@@ -18,13 +20,39 @@ type Model struct {
 	UpdatedAt int64  `orm:"updated 'updated_at'"              gorm:"autoUpdateTime;column:updated_at" xorm:"updated 'updated_at'"       json:"updated_at"`
 }
 
-// SoftDelete 软删除结构体，嵌入模型以启用软删除功能。
+// ── 框架托管软删除（sd 标记，文档 §4.5/§11.9）─────────────────────────
 //
-// 注意：不声明 xorm deleted 行为 tag——框架软删除为业务级实现
-// （OnlyTrashed/Restore/ForceDelete），避免与 xorm 原生 deleted 语义冲突
+// 嵌入下列任一结构体即启用框架托管自动软删（gorm 风格）：Delete 自动改写为
+// 置位 UPDATE、默认查询（Find/First/Count/… 与 Preload 子查询）自动过滤存活行、
+// Unscoped 绕过、OnlyTrashed/Restore/ForceDelete 类型感知。值模式经 sd tag 声明，
+// 缺省秒级。无 sd 标记的 deleted_at 列为纯业务列（保持旧版手动语义兼容）。
+//
+// 注意：不声明 xorm deleted 行为 tag——避免与 xorm 原生 deleted 语义冲突
 // （deleted 为 orm tag 禁用 token，文档 §4.4）。
+
+// SoftDelete 软删除（秒级，默认模式）：deleted_at 为 int64 Unix 秒，0=存活。
 type SoftDelete struct {
-	DeletedAt int64 `orm:"'deleted_at' index default(0)" gorm:"column:deleted_at;index;default:0" xorm:"'deleted_at' index default(0)" json:"deleted_at"`
+	DeletedAt int64 `orm:"'deleted_at' index default(0)" gorm:"column:deleted_at;index;default:0" xorm:"'deleted_at' index default(0)" sd:"" json:"deleted_at"`
+}
+
+// SoftDeleteMilli 软删除（毫秒级）：deleted_at 为 int64 Unix 毫秒，0=存活。
+type SoftDeleteMilli struct {
+	DeletedAt int64 `orm:"'deleted_at' index default(0)" gorm:"column:deleted_at;index;default:0" xorm:"'deleted_at' index default(0)" sd:"milli" json:"deleted_at"`
+}
+
+// SoftDeleteNano 软删除（纳秒级）：deleted_at 为 int64 Unix 纳秒，0=存活。
+type SoftDeleteNano struct {
+	DeletedAt int64 `orm:"'deleted_at' index default(0)" gorm:"column:deleted_at;index;default:0" xorm:"'deleted_at' index default(0)" sd:"nano" json:"deleted_at"`
+}
+
+// SoftDeleteFlag 软删除（0/1 标记）：存活 0、删除写 1。
+type SoftDeleteFlag struct {
+	DeletedAt int64 `orm:"'deleted_at' index default(0)" gorm:"column:deleted_at;index;default:0" xorm:"'deleted_at' index default(0)" sd:"flag" json:"deleted_at"`
+}
+
+// SoftDeleteTime 软删除（时间戳 NULL 语义）：NULL=存活、删除写当前时间。
+type SoftDeleteTime struct {
+	DeletedAt *time.Time `orm:"'deleted_at' index null" gorm:"column:deleted_at;index" xorm:"'deleted_at' index null" sd:"time" json:"deleted_at"`
 }
 
 // AutoGenerateID 实现 contracts.IDAutoGenerator。

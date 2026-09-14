@@ -75,6 +75,19 @@ type ptGhost struct {
 	ID string
 }
 
+// ptSoftUser/ptSoftOrder 业务级软删模型：子表 int64 deleted_at 列（0=存活），
+// 引擎须自动附加 deleted_at = 0 过滤（契约 10，§11.9）。
+type ptSoftUser struct {
+	ID     string
+	Orders []ptSoftOrder `orm:"-" rel:"foreignKey:UserID;references:ID"`
+}
+
+type ptSoftOrder struct {
+	ID        string
+	UserID    string
+	DeletedAt int64
+}
+
 // 约定回退（无 rel/gorm 外键 tag）：has 系约定 <父表名蛇形>_<引用列蛇形>
 // = "pt_post_id"，与子表 ptTag.PtPostID（蛇形 pt_post_id）对齐。
 type ptPost struct {
@@ -179,6 +192,15 @@ func (m *fakeMeta) HasColumn(t reflect.Type, columnName string) bool {
 		}
 	}
 	return false
+}
+
+// SoftDeleteColumn 内存实现：Go 字段 DeletedAt 映射列（业务级 int64 软删，
+// 0=存活）；无该字段返回 ok=false。
+func (m *fakeMeta) SoftDeleteColumn(t reflect.Type) (string, bool) {
+	if col, ok := m.cols[t]["DeletedAt"]; ok {
+		return col, true
+	}
+	return "", false
 }
 
 // ── fakeDB / fakeQuery ──────────────────────────────────────────────
@@ -401,6 +423,93 @@ func TestHasManyBatchINAndBackfill(t *testing.T) {
 	// 契约 5：无子行 → 非 nil 空切片
 	if users[2].Orders == nil || len(users[2].Orders) != 0 {
 		t.Fatalf("u3.Orders 应为非 nil 空切片: %#v", users[2].Orders)
+	}
+}
+
+// ── 契约 10：业务级软删自动过滤 ─────────────────────────────────────
+
+func TestSoftDeleteAutoFilter(t *testing.T) {
+	eng, db := newTestEngine(ptSoftUser{}, ptSoftOrder{})
+	db.rows["pt_soft_order"] = []any{
+		ptSoftOrder{ID: "o1", UserID: "u1"},
+		ptSoftOrder{ID: "o4", UserID: "u1", DeletedAt: 99},
+	}
+	users := []ptSoftUser{{ID: "u1"}}
+	if err := eng.Preload(&users, "Orders", nil, nil); err != nil {
+		t.Fatalf("Preload: %v", err)
+	}
+	// 子查询须自动附加 deleted_at = 0（与 IN 条件 AND）
+	found := false
+	for _, w := range db.executed[0].wheres {
+		if sql, ok := w.sql.(string); ok && sql == "deleted_at = ?" && len(w.args) == 1 && fmt.Sprint(w.args[0]) == "0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("子查询缺少 deleted_at = 0 自动过滤: %+v", db.executed[0].wheres)
+	}
+	// 软删子行不回填
+	if len(users[0].Orders) != 1 || users[0].Orders[0].ID != "o1" {
+		t.Fatalf("软删子行不应回填, 实际 %+v", users[0].Orders)
+	}
+}
+
+// 无软删列的模型不得附加任何 deleted_at 条件（防误过滤）。
+func TestSoftDeleteAutoFilterAbsentColumn(t *testing.T) {
+	eng, db := newTestEngine(ptUser{}, ptOrder{})
+	db.rows["pt_order"] = []any{ptOrder{ID: "o1", UserID: "u1"}}
+	users := []ptUser{{ID: "u1"}}
+	if err := eng.Preload(&users, "Orders", nil, nil); err != nil {
+		t.Fatalf("Preload: %v", err)
+	}
+	for _, w := range db.executed[0].wheres {
+		if sql, ok := w.sql.(string); ok && strings.Contains(sql, "deleted_at") {
+			t.Fatalf("无软删列模型不应附加 deleted_at 过滤: %q", sql)
+		}
+	}
+	if len(users[0].Orders) != 1 {
+		t.Fatalf("u1.Orders 应有 1 行: %+v", users[0].Orders)
+	}
+}
+
+// sdCondMeta 包装 fakeMeta 实现 SoftDeleteCondResolver（sd tag 类型感知
+// 条件），验证引擎优先消费解析器条件、跳过 SoftDeleteColumn 的 int64 约定。
+type sdCondMeta struct {
+	*fakeMeta
+	conds map[reflect.Type]string
+}
+
+func (m *sdCondMeta) SoftDeleteCond(t reflect.Type) (string, []any, bool) {
+	if cond, ok := m.conds[t]; ok {
+		return cond, nil, true
+	}
+	return "", nil, false
+}
+
+// 契约 10 扩展：sd 模型（SoftDeleteCondResolver）类型感知——time 模式
+// IS NULL 必须优先于 SoftDeleteColumn 的 int64 = 0 约定（= 0 会把 NULL
+// 存活行全部过滤掉）。
+func TestSoftDeleteAutoFilterSdResolver(t *testing.T) {
+	eng, db := newTestEngine(ptSoftUser{}, ptSoftOrder{})
+	eng.Meta = &sdCondMeta{fakeMeta: eng.Meta.(*fakeMeta), conds: map[reflect.Type]string{
+		reflect.TypeOf(ptSoftOrder{}): "deleted_at IS NULL",
+	}}
+	db.rows["pt_soft_order"] = []any{ptSoftOrder{ID: "o1", UserID: "u1"}}
+	users := []ptSoftUser{{ID: "u1"}}
+	if err := eng.Preload(&users, "Orders", nil, nil); err != nil {
+		t.Fatalf("Preload: %v", err)
+	}
+	found := false
+	for _, w := range db.executed[0].wheres {
+		if sql, ok := w.sql.(string); ok && sql == "deleted_at IS NULL" && len(w.args) == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sd 模型子查询应附加 IS NULL 存活条件: %+v", db.executed[0].wheres)
+	}
+	if len(users[0].Orders) != 1 || users[0].Orders[0].ID != "o1" {
+		t.Fatalf("u1.Orders 应有 1 行: %+v", users[0].Orders)
 	}
 }
 

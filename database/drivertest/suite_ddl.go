@@ -158,7 +158,7 @@ func suiteDDL(t *testing.T, f Factory) {
 		assertColumnsEqual(t, "suite_soft_dels", ddlColumns(ddl["table:suite_soft_dels"]),
 			[]string{"id", "name", "deleted_at"})
 		assertColumnsEqual(t, "suite_photos", ddlColumns(ddl["table:suite_photos"]),
-			[]string{"id", "owner_id", "owner_type", "url"})
+			[]string{"id", "owner_id", "owner_type", "url", "deleted_at"}) // 业务级软删列（§11.9）
 		assertColumnsEqual(t, "suite_user_roles", ddlColumns(ddl["table:suite_user_roles"]),
 			[]string{"id", "code"})
 		assertColumnsEqual(t, "suite_versioned", ddlColumns(ddl["table:suite_versioned"]),
