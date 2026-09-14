@@ -8,7 +8,8 @@ import (
 )
 
 const (
-	// defaultLockTTL 持锁进程崩溃后，锁文件可被回收的默认 TTL。
+	// defaultLockTTL 写入锁文件的元信息 TTL（仅作排查参考）。
+	// flock/LockFileEx 在进程退出或 fd 关闭时由内核自动释放，无需依赖 TTL 回收。
 	defaultLockTTL = 30 * time.Second
 	// defaultLockWait 获取锁的默认最长等待时间。
 	defaultLockWait = 30 * time.Second
@@ -51,16 +52,14 @@ func acquireCrossProcessLockBlocking(lockPath string, wait, lockTTL time.Duratio
 	return f, nil
 }
 
-// releaseCrossProcessLock 释放跨进程锁。
-func releaseCrossProcessLock(f *os.File, lockPath string) error {
-	if err := unlockFile(f); err != nil {
-		return err
-	}
-	err := os.Remove(lockPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+// releaseCrossProcessLock 释放跨进程锁：仅解锁关闭，不删除锁文件。
+// flock/LockFileEx 基于 inode（Linux 为 open file description），删除基于路径——
+// "解锁后立即删文件"会让重试中的等待者 flock 到已断链的旧 inode、后来者经
+// O_CREATE 获得新 inode，两个持锁方并发进入临界区（经典 flock+unlink 双持
+// 竞态，曾致跨进程并发自增丢更新）。锁文件持久存在无副作用：进程退出/崩溃
+// 时内核自动释放锁；Flush 也会保留 .locks 目录（见 file_store.go Flush）。
+func releaseCrossProcessLock(f *os.File, _ string) error {
+	return unlockFile(f)
 }
 
 // forceReleaseCrossProcessLock 强制删除锁文件。

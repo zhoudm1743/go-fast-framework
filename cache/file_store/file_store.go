@@ -40,6 +40,9 @@ const (
 	tagDirName = ".tags"
 	// tagFileExt tag 索引文件后缀。
 	tagFileExt = ".tag"
+	// locksDirName 跨进程锁目录：Flush 必须保留（flock 基于 inode，删除持锁中
+	// 的锁文件会让等待者经 O_CREATE 拿到新 inode 立即获锁，与持锁方双持）。
+	locksDirName = ".locks"
 )
 
 // FileStore 基于本地文件系统的缓存存储实现。
@@ -147,7 +150,7 @@ func (s *FileStore) shardFromCachePath(path string) string {
 }
 
 func (s *FileStore) shardLockPath(shard string) string {
-	return filepath.Join(s.dir, ".locks", "shards", shard+".lock")
+	return filepath.Join(s.dir, locksDirName, "shards", shard+".lock")
 }
 
 func (s *FileStore) processShardMu(shard string) *sync.Mutex {
@@ -157,7 +160,7 @@ func (s *FileStore) processShardMu(shard string) *sync.Mutex {
 
 func (s *FileStore) tagLockPath(tag string) string {
 	sum := md5.Sum([]byte(tag))
-	return filepath.Join(s.dir, ".locks", "tags", hex.EncodeToString(sum[:])+".lock")
+	return filepath.Join(s.dir, locksDirName, "tags", hex.EncodeToString(sum[:])+".lock")
 }
 
 // withShardLock 在目录分片级跨进程文件锁保护下执行读-改-写。
@@ -238,23 +241,20 @@ func parseFile(data []byte) fileEntry {
 
 // writeFile 以临时文件 + rename 的方式原子写入缓存文件。
 func (s *FileStore) writeFile(path string, expireAt int64, body string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".go-fast-tmp-*")
+	content := strconv.FormatInt(expireAt, 10) + "\n" + body
+	return writeFileAtomic(filepath.Dir(path), ".go-fast-tmp-*", path, []byte(content))
+}
+
+// writeTempAndRename 在 dir 下建临时文件写入 content，sync+close 后原子 rename
+// 到 path；任何一步失败都清理临时文件。
+func writeTempAndRename(dir, pattern, path string, content []byte) error {
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-
-	header := strconv.FormatInt(expireAt, 10) + "\n"
-	if _, err := tmp.WriteString(header); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.WriteString(body); err != nil {
+	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -266,6 +266,23 @@ func (s *FileStore) writeFile(path string, expireAt int64, body string) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// writeFileAtomic 保证目录存在后走临时文件 + rename；Flush 并发 RemoveAll
+// 分片目录会使 CreateTemp/Rename 返回 ENOENT——重建目录重试一次（缓存语义下，
+// 与清空并发的写落在清空前或清空后均可接受），避免并发清空期间写操作报错。
+func writeFileAtomic(dir, pattern, path string, content []byte) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	err := writeTempAndRename(dir, pattern, path, content)
+	if err == nil || !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return writeTempAndRename(dir, pattern, path, content)
 }
 
 func (s *FileStore) writeEntry(path string, value any, expireAt int64) error {
@@ -432,14 +449,32 @@ func (s *FileStore) Forget(key string) error {
 	return nil
 }
 
-// Flush 删除整个缓存目录并重建（清空全部缓存）。
+// Flush 清空全部缓存数据（*.cache 数据文件与 .tags 索引）并重置 tag 内存索引。
+// 保留 .locks/ 锁目录与分片目录骨架：
+//  1. .locks 必须保留——flock/LockFileEx 基于 inode，删除持锁方仍在使用的锁
+//     文件会让等待者经 O_CREATE 拿到新 inode 立即获锁，与持锁方并发进入临界区
+//     （flock+unlink 双持竞态，曾致并发自增丢更新），与 releaseCrossProcessLock
+//     不删锁文件同理；
+//  2. 分片目录骨架保留——与进行中的写并发时 RemoveAll 目录会让 CreateTemp/
+//     Rename 报 ENOENT；只删文件则写路径始终有稳定目录可落，与 Flush 并发的写
+//     落在清空前或清空后均可接受。
+//
+// 已知无害窗口：Flush 与 persistTagIndex 并发可能复活某个 tag 索引文件（内容
+// 指向已删缓存文件）——tagged Flush 对其只做幂等 Forget，重启加载时亦会剔除
+// stale key，不影响正确性。
 func (s *FileStore) Flush() error {
-	if err := os.RemoveAll(s.dir); err != nil {
+	if err := os.RemoveAll(s.tagDir()); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return err
-	}
+	_ = filepath.WalkDir(s.dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), cacheFileExt) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
 	s.tagMu.Lock()
 	s.tags = make(map[string]map[string]struct{})
 	s.tagMu.Unlock()
@@ -672,17 +707,28 @@ func (s *FileStore) persistTagIndex(tag string) error {
 		if err != nil {
 			return err
 		}
+		// 合并进内存索引自己的 map（不得让 s.tags[tag] 别名 diskKeys——
+		// writeTagIndexFile 在锁外迭代该 map，track 并发写同一块 map 会
+		// 触发 data race / concurrent map iteration fatal）。merged 为本地
+		// 副本，专供锁外落盘迭代。
 		s.tagMu.Lock()
-		for k := range s.tags[tag] {
-			diskKeys[k] = struct{}{}
+		mem := s.tags[tag]
+		if mem == nil {
+			mem = make(map[string]struct{}, len(diskKeys))
+			s.tags[tag] = mem
 		}
-		if len(diskKeys) == 0 {
+		for k := range diskKeys {
+			mem[k] = struct{}{}
+		}
+		if len(mem) == 0 {
 			delete(s.tags, tag)
-		} else {
-			s.tags[tag] = diskKeys
+		}
+		merged := make(map[string]struct{}, len(mem))
+		for k := range mem {
+			merged[k] = struct{}{}
 		}
 		s.tagMu.Unlock()
-		return s.writeTagIndexFile(tag, diskKeys)
+		return s.writeTagIndexFile(tag, merged)
 	})
 }
 
@@ -727,25 +773,7 @@ func (s *FileStore) writeTagIndexFile(tag string, keys map[string]struct{}) erro
 	if err := os.MkdirAll(s.tagDir(), 0o755); err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".go-fast-tag-tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(body); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return writeFileAtomic(filepath.Dir(path), ".go-fast-tag-tmp-*", path, body)
 }
 
 // ── Hash 操作 ────────────────────────────────────────────────────────
@@ -868,7 +896,7 @@ func (s *FileStore) HKeys(key string) ([]string, error) {
 // Lock 获取跨进程文件锁（基于 .locks/cache/ 下独占锁文件）。
 func (s *FileStore) Lock(key string, ttl time.Duration) contracts.CacheLock {
 	sum := md5.Sum([]byte(key))
-	lockPath := filepath.Join(s.dir, ".locks", "cache", hex.EncodeToString(sum[:])+".lock")
+	lockPath := filepath.Join(s.dir, locksDirName, "cache", hex.EncodeToString(sum[:])+".lock")
 	actual, _ := s.locks.LoadOrStore(key, &crossProcessCacheLock{lockPath: lockPath, ttl: ttl})
 	return actual.(*crossProcessCacheLock)
 }

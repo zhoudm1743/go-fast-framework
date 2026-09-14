@@ -525,6 +525,64 @@ func TestCrossProcess_IncrementTwoStores(t *testing.T) {
 	}
 }
 
+// 锁文件释放后保留（flock+unlink 竞态修复）：flock 基于 inode，释放时删除
+// 锁文件会让等待者 flock 到已断链的旧 inode、后来者 O_CREATE 新 inode，
+// 双方同时持有"同名锁"（曾致 TestCrossProcess_IncrementTwoStores 丢更新）。
+func TestCrossProcessLock_ReleaseKeepsLockFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "x.lock")
+	f, err := acquireCrossProcessLockBlocking(p, time.Second, 0)
+	if err != nil {
+		t.Fatalf("获取锁失败: %v", err)
+	}
+	if err := releaseCrossProcessLock(f, p); err != nil {
+		t.Fatalf("释放锁失败: %v", err)
+	}
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		t.Fatal("释放后锁文件应保留；删除会引入 flock+unlink 双持竞态")
+	}
+	// 保留的锁文件不影响再次获取（flock 随 fd 关闭释放）
+	f2, err := acquireCrossProcessLockBlocking(p, time.Second, 0)
+	if err != nil {
+		t.Fatalf("再次获取锁失败: %v", err)
+	}
+	_ = releaseCrossProcessLock(f2, p)
+}
+
+// 压力回归：多 store 实例并发自增不得丢更新（双持竞态在高并发/负载下放大）。
+func TestCrossProcess_IncrementStress(t *testing.T) {
+	dir := t.TempDir()
+	stores := []*FileStore{
+		newTestStoreDir(t, dir),
+		newTestStoreDir(t, dir),
+		newTestStoreDir(t, dir),
+		newTestStoreDir(t, dir),
+	}
+	const rounds, per = 3, 250
+	for r := 0; r < rounds; r++ {
+		key := fmt.Sprintf("cnt-%d", r)
+		var wg sync.WaitGroup
+		var fails atomic.Int32
+		wg.Add(per * len(stores))
+		for _, s := range stores {
+			for i := 0; i < per; i++ {
+				go func(s *FileStore) {
+					defer wg.Done()
+					if _, err := s.Increment(key); err != nil {
+						fails.Add(1)
+					}
+				}(s)
+			}
+		}
+		wg.Wait()
+		if fails.Load() > 0 {
+			t.Fatalf("第 %d 轮 %d 次 Increment 失败", r, fails.Load())
+		}
+		if got := stores[0].GetInt(key); got != per*len(stores) {
+			t.Fatalf("第 %d 轮自增期望 %d，实际 %d（丢更新=flock+unlink 双持竞态）", r, per*len(stores), got)
+		}
+	}
+}
+
 func TestCrossProcess_TagIndexTwoStores(t *testing.T) {
 	dir := t.TempDir()
 	s1 := newTestStoreDir(t, dir)
@@ -794,6 +852,108 @@ func TestNew_StopIdempotent(t *testing.T) {
 	s.Stop()
 	s.Stop()
 	s.Stop()
+}
+
+// TestFlush_KeepsLockFiles 回归：Flush 保留 .locks 目录。删除持锁中的锁文件
+// 会让等待者经 O_CREATE 拿到新 inode 立即获锁，与持锁方双持（flock+unlink
+// 竞态曾致并发自增丢更新）；Flush 此前 RemoveAll 整棵目录树，是同一竞态的
+// 另一个入口。
+func TestFlush_KeepsLockFiles(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.Put("a", 1, 0)
+	// 先制造锁文件：分片锁 + 用户锁
+	_, _ = s.Increment("a")
+	l := s.Lock("res", time.Second)
+	if !l.Acquire() {
+		t.Fatal("获取用户锁失败")
+	}
+	l.Release()
+
+	locksDir := filepath.Join(s.dir, locksDirName)
+	if _, err := os.Stat(locksDir); err != nil {
+		t.Fatalf("Flush 前 .locks 应存在: %v", err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush 失败: %v", err)
+	}
+	if _, err := os.Stat(locksDir); err != nil {
+		t.Fatal("Flush 后 .locks 目录应保留（删除持锁中的锁文件会引入双持竞态）")
+	}
+	if s.Has("a") {
+		t.Fatal("Flush 后数据应清空")
+	}
+	// 保留锁文件不影响后续全部操作
+	if err := s.Put("b", 2, 0); err != nil || s.GetInt("b") != 2 {
+		t.Fatal("Flush 后 Put/Get 失败")
+	}
+	if _, err := s.Increment("cnt"); err != nil || s.GetInt("cnt") != 1 {
+		t.Fatal("Flush 后 Increment 失败")
+	}
+	if err := s.HSet("h", "f", 1); err != nil || !s.HExists("h", "f") {
+		t.Fatal("Flush 后 Hash 操作失败")
+	}
+	l2 := s.Lock("res", time.Second)
+	if !l2.Acquire() {
+		t.Fatal("Flush 后用户锁应可获取")
+	}
+	l2.ForceRelease()
+}
+
+// TestFlush_DoesNotInvalidateHeldShardLock 回归（确定性双持复现）：s1 持有分片
+// 锁期间并发 Flush，等待中的 s2 必须仍阻塞在 flock 上（Flush 不得使锁文件
+// 断链）；s1 释放后 s2 才完成。修复前 s2 会拿到新 inode 的锁与 s1 并发进入
+// 临界区，或报 ENOENT。
+func TestFlush_DoesNotInvalidateHeldShardLock(t *testing.T) {
+	dir := t.TempDir()
+	s1 := newTestStoreDir(t, dir)
+	s2 := newTestStoreDir(t, dir)
+
+	path := s1.filePath("cnt")
+	shard := s1.shardFromCachePath(path)
+	pm := s1.processShardMu(shard)
+	pm.Lock()
+	f, err := acquireCrossProcessLockBlocking(s1.shardLockPath(shard), time.Second, 0)
+	if err != nil {
+		t.Fatalf("获取分片锁失败: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			_ = releaseCrossProcessLock(f, s1.shardLockPath(shard))
+			pm.Unlock()
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s2.Increment("cnt")
+		done <- err
+	}()
+
+	// 等 s2 进入 flock 等待后 Flush：锁文件必须保留，s2 应继续阻塞
+	time.Sleep(100 * time.Millisecond)
+	if err := s1.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("双持竞态：s1 仍持锁时 s2 的 Increment 已返回（err=%v），Flush 断链了锁文件", err)
+	case <-time.After(300 * time.Millisecond):
+		// 期望路径：s2 仍阻塞在保留的锁文件上
+	}
+
+	_ = releaseCrossProcessLock(f, s1.shardLockPath(shard))
+	pm.Unlock()
+	released = true
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("s1 释放后 s2 Increment 出错: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("s1 释放后 s2 仍阻塞（等待者被遗弃）")
+	}
 }
 
 // ── 并发安全 ─────────────────────────────────────────────────────────
