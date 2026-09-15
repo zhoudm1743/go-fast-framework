@@ -1,6 +1,9 @@
 package contracts
 
 // Config 配置服务契约。
+//
+// 配置来源优先级（高 → 低）：运行时 Set() > config.<APP_ENV>.yaml（设置 APP_ENV 时）
+// > config/config.yaml > Go 代码注册默认值（Add）。配置文件均可选：不存在时跳过。
 type Config interface {
 	// Env 读取环境变量，支持默认值。
 	Env(key string, defaultValue ...any) any
@@ -25,7 +28,8 @@ type Config interface {
 	// 也可在 ServiceProvider.Register 中手动调用，为插件配置项提供合理的默认值。
 	SetDefaults(defaults map[string]any)
 	// Add 以命名空间注册配置，写入默认值层。
-	// 优先级低于 YAML 配置文件与 Set()：同名键以 config/config.yaml 与运行时 Set 为准。
+	// 优先级低于 YAML 配置文件与 Set()：同名键以 config/config.yaml、
+	// APP_ENV 环境覆盖层（config.<APP_ENV>.yaml）与运行时 Set 为准。
 	// 典型用法：项目根 config/ 包在 init() 中通过此方法注册 Go 配置。
 	//
 	// 示例：

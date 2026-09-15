@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/spf13/viper"
@@ -69,18 +71,34 @@ type configImpl struct {
 // NewConfig 创建 Config 实例。
 // path 指向的 YAML 为可选覆盖层：文件不存在时跳过加载，仅依赖 Go 配置默认值；
 // 文件存在但无法读取/解析时仍返回错误。
+//
+// 当环境变量 APP_ENV 非空时（如 dev、prod），额外加载同目录的 config.<APP_ENV>.yaml
+// 作为覆盖层：同名键覆盖 path 主配置，新增键并入；该文件同样可选，不存在时跳过。
 func NewConfig(path string) (contracts.Config, error) {
 	v := viper.New()
 	v.SetConfigType("yaml")
 	v.SetConfigFile(path)
 
-	if err := v.ReadInConfig(); err != nil {
-		if isConfigFileMissing(err) {
-			return &configImpl{viper: v}, nil
-		}
+	if err := v.ReadInConfig(); err != nil && !isConfigFileMissing(err) {
 		return nil, fmt.Errorf("[GoFast] 读取配置文件失败: %w", err)
 	}
+
+	if env := os.Getenv("APP_ENV"); env != "" {
+		envPath := envConfigPath(path, env)
+		v.SetConfigFile(envPath)
+		if err := v.MergeInConfig(); err != nil && !isConfigFileMissing(err) {
+			return nil, fmt.Errorf("[GoFast] 读取环境配置文件 %s 失败: %w", envPath, err)
+		}
+	}
+
 	return &configImpl{viper: v}, nil
+}
+
+// envConfigPath 由主配置文件路径推导环境配置文件路径：
+// 在扩展名前插入 .<env>，如 config.yaml + dev → config.dev.yaml。
+func envConfigPath(path, env string) string {
+	ext := filepath.Ext(path)
+	return strings.TrimSuffix(path, ext) + "." + env + ext
 }
 
 // isConfigFileMissing 判断是否为「配置文件不存在」（可选加载场景）。

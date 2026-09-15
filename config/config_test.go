@@ -830,3 +830,118 @@ func TestPackageAdd_Concurrent(t *testing.T) {
 		t.Fatal("注册表不应为空")
 	}
 }
+
+// ── 环境配置文件（config.<APP_ENV>.yaml）测试 ─────────────────────────
+
+// writeEnvConfigFile 在主配置文件同目录写入 config.<env>.yaml。
+func writeEnvConfigFile(t *testing.T, basePath, env, content string) string {
+	t.Helper()
+	path := envConfigPath(basePath, env)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("写入临时环境配置文件失败: %v", err)
+	}
+	return path
+}
+
+func TestEnvConfigPath(t *testing.T) {
+	cases := map[string]string{
+		"/app/config.yaml":      "/app/config.dev.yaml",
+		"config.yaml":           "config.dev.yaml",
+		"/app/config.local.yml": "/app/config.local.dev.yml",
+		"/app/noext":            "/app/noext.dev",
+	}
+	for base, want := range cases {
+		if got := envConfigPath(base, "dev"); got != want {
+			t.Fatalf("envConfigPath(%q, \"dev\") = %q，期望 %q", base, got, want)
+		}
+	}
+}
+
+func TestNewConfig_EnvFileOverridesBase(t *testing.T) {
+	t.Setenv("APP_ENV", "dev")
+	path := tempConfigFile(t, `
+app:
+  name: base-app
+  debug: false
+server:
+  port: 8080
+`)
+	writeEnvConfigFile(t, path, "dev", `
+app:
+  debug: true
+database:
+  host: dev-db
+`)
+	cfg, err := NewConfig(path)
+	if err != nil {
+		t.Fatalf("NewConfig 应该成功: %v", err)
+	}
+
+	if v := cfg.GetBool("app.debug"); v != true {
+		t.Fatalf("环境配置应覆盖同名键，期望 true，得到 %v", v)
+	}
+	if v := cfg.GetString("app.name"); v != "base-app" {
+		t.Fatalf("主配置独有键应保留，期望 base-app，得到 %v", v)
+	}
+	if v := cfg.GetInt("server.port"); v != 8080 {
+		t.Fatalf("主配置独有键应保留，期望 8080，得到 %v", v)
+	}
+	if v := cfg.GetString("database.host"); v != "dev-db" {
+		t.Fatalf("环境配置新增键应可见，期望 dev-db，得到 %v", v)
+	}
+}
+
+func TestNewConfig_EnvFileWithoutBase(t *testing.T) {
+	t.Setenv("APP_ENV", "prod")
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "config.yaml")
+	writeEnvConfigFile(t, basePath, "prod", "app:\n  name: prod-app\n")
+
+	cfg, err := NewConfig(basePath)
+	if err != nil {
+		t.Fatalf("主配置缺失但环境配置存在时应成功: %v", err)
+	}
+	if v := cfg.GetString("app.name"); v != "prod-app" {
+		t.Fatalf("期望 prod-app，得到 %v", v)
+	}
+}
+
+func TestNewConfig_EnvFileMissing_Optional(t *testing.T) {
+	t.Setenv("APP_ENV", "prod")
+	path := tempConfigFile(t, "server:\n  port: 8080")
+
+	cfg, err := NewConfig(path)
+	if err != nil {
+		t.Fatalf("环境配置文件不存在时应可选跳过: %v", err)
+	}
+	if v := cfg.GetInt("server.port"); v != 8080 {
+		t.Fatalf("主配置值应保留，期望 8080，得到 %v", v)
+	}
+}
+
+func TestNewConfig_EnvFileInvalid_Errors(t *testing.T) {
+	t.Setenv("APP_ENV", "dev")
+	path := tempConfigFile(t, "server:\n  port: 8080")
+	writeEnvConfigFile(t, path, "dev", "server:\n  port: [unclosed")
+
+	cfg, err := NewConfig(path)
+	if err == nil {
+		t.Fatal("存在但无法解析的环境配置 YAML 应返回错误")
+	}
+	if cfg != nil {
+		t.Fatal("环境配置解析失败时应返回 nil config")
+	}
+}
+
+func TestNewConfig_EnvNotSet_SkipsEnvLayer(t *testing.T) {
+	t.Setenv("APP_ENV", "")
+	path := tempConfigFile(t, "server:\n  port: 8080")
+
+	cfg, err := NewConfig(path)
+	if err != nil {
+		t.Fatalf("NewConfig 应该成功: %v", err)
+	}
+	if v := cfg.GetInt("server.port"); v != 8080 {
+		t.Fatalf("期望 8080，得到 %v", v)
+	}
+}
