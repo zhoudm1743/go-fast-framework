@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/zhoudm1743/go-fast-framework/contracts"
+	"github.com/zhoudm1743/go-fast-framework/id"
 )
 
 // UploadedFile 封装 HTTP multipart 上传文件，实现 contracts.File。
@@ -99,9 +99,9 @@ func (f *UploadedFile) GetClientOriginalExtension() string {
 	return strings.TrimPrefix(filepath.Ext(f.header.Filename), ".")
 }
 
-// HashName 返回 UUID 随机文件名（含扩展名），可传入可选路径前缀。
+// HashName 返回框架时序 ID 随机文件名（含扩展名），可传入可选路径前缀。
 func (f *UploadedFile) HashName(path ...string) string {
-	name := uuid.New().String() + filepath.Ext(f.header.Filename)
+	name := id.New() + filepath.Ext(f.header.Filename)
 	if len(path) > 0 && path[0] != "" {
 		return strings.TrimSuffix(path[0], "/") + "/" + name
 	}
