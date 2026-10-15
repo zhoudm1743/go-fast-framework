@@ -1,8 +1,10 @@
 package queue
 
 import (
+	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,12 +28,27 @@ func WithWorkers(n int) Option {
 // manager 队列管理器（同步驱动 + 有界 worker 池）。
 type manager struct {
 	log     contracts.Log
+	tracer  contracts.RadarTracer // radar 挂载的执行追踪（可选，nil 时无埋点）
 	workers int
 	jobCh   chan *pendingTask
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 	mu      sync.Mutex
 	stopped bool
+}
+
+// SetTracer 挂载任务执行追踪（radar 可观测性扩展点，鸭子类型挂载）。
+func (m *manager) SetTracer(t contracts.RadarTracer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tracer = t
+}
+
+// getTracer 读取当前挂载的 tracer。
+func (m *manager) getTracer() contracts.RadarTracer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tracer
 }
 
 // New 创建队列管理器；log 用于输出任务失败/重试日志，不能为 nil。
@@ -60,7 +77,7 @@ func (m *manager) startWorkers() {
 func (m *manager) worker() {
 	defer m.wg.Done()
 	for task := range m.jobCh {
-		if err := task.run(); err != nil {
+		if err := m.runTraced(task); err != nil {
 			m.log.WithError(err).
 				WithField("queue", task.queue).
 				WithField("connection", task.connection).
@@ -68,6 +85,24 @@ func (m *manager) worker() {
 				Error("[GoFast] 队列任务执行失败")
 		}
 	}
+}
+
+// runTraced 执行任务；挂载 tracer 时包一层 consumer span。
+func (m *manager) runTraced(task *pendingTask) (err error) {
+	tracer := m.getTracer()
+	if tracer == nil {
+		return task.run()
+	}
+	_, span := tracer.Start(context.Background(),
+		"queue.exec "+strings.Join(task.signatures(), ","),
+		func(c *contracts.RadarSpanConfig) { c.Kind = contracts.RadarSpanKindConsumer })
+	defer span.End()
+	err = task.run()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(contracts.RadarStatusError, err.Error())
+	}
+	return err
 }
 
 // enqueue 投递任务；队列关闭时返回错误。缓冲满时阻塞（背压）。

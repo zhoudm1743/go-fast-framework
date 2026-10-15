@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zhoudm1743/go-fast-framework/contracts"
@@ -21,7 +22,53 @@ import (
 type logger struct {
 	base    *zap.Logger
 	sugar   *zap.SugaredLogger
-	closers []io.Closer // lumberjack 等需要 Close 的 writer
+	cores   []zapcore.Core // 全部输出核（AddCore 追加后重建 tee）
+	closers []io.Closer    // lumberjack 等需要 Close 的 writer
+}
+
+// AddCore 追加日志输出核（radar 可观测性等扩展的挂载点）。
+// 追加后重建 tee，后续日志同时写入所有核。
+func (l *logger) AddCore(core zapcore.Core) {
+	l.cores = append(l.cores, core)
+	z := zap.New(zapcore.NewTee(l.cores...),
+		zap.AddStacktrace(zapcore.FatalLevel),
+	)
+	l.base = z
+	l.sugar = z.Sugar()
+}
+
+// contextFieldExtractor 从 context.Context 抽取附加 zap 字段。
+// 由 radar 等可观测性扩展注册（trace_id / span_id 关联）。
+var contextFieldExtractor struct {
+	sync.RWMutex
+	fn func(ctx context.Context) []zapcore.Field
+}
+
+// SetContextFieldExtractor 注册 ctx 字段抽取器；注册后 WithContext(ctx) 会附带抽取的字段。
+func SetContextFieldExtractor(fn func(ctx context.Context) []zapcore.Field) {
+	contextFieldExtractor.Lock()
+	defer contextFieldExtractor.Unlock()
+	contextFieldExtractor.fn = fn
+}
+
+// fieldsToArgs zapcore.Field 切片 → sugar.With 参数。
+func fieldsToArgs(fields []zapcore.Field) []any {
+	args := make([]any, len(fields))
+	for i, f := range fields {
+		args[i] = f
+	}
+	return args
+}
+
+// extractContextFields 调用已注册的抽取器。
+func extractContextFields(ctx context.Context) []zapcore.Field {
+	contextFieldExtractor.RLock()
+	fn := contextFieldExtractor.fn
+	contextFieldExtractor.RUnlock()
+	if fn == nil || ctx == nil {
+		return nil
+	}
+	return fn(ctx)
 }
 
 // logEntry 包装 zap.SugaredLogger 以实现 contracts.Log 链式调用。
@@ -113,23 +160,24 @@ func NewLogger(cfg contracts.Config) (contracts.Log, error) {
 
 	// 3. 按 mode 构建 Core
 	mode := cfg.GetString("log.mode", "hybrid")
-	core, closers, err := buildCores(cfg, atomicLevel, mode)
+	cores, closers, err := buildCores(cfg, atomicLevel, mode)
 	if err != nil {
 		return nil, err
 	}
 
-	z := zap.New(core,
+	z := zap.New(zapcore.NewTee(cores...),
 		zap.AddStacktrace(zapcore.FatalLevel), // Fatal 及以上记录调用栈
 	)
 
 	return &logger{
 		base:    z,
 		sugar:   z.Sugar(),
+		cores:   cores,
 		closers: closers,
 	}, nil
 }
 
-func buildCores(cfg contracts.Config, lvl zap.AtomicLevel, mode string) (zapcore.Core, []io.Closer, error) {
+func buildCores(cfg contracts.Config, lvl zap.AtomicLevel, mode string) ([]zapcore.Core, []io.Closer, error) {
 	var cores []zapcore.Core
 	var closers []io.Closer
 
@@ -162,7 +210,7 @@ func buildCores(cfg contracts.Config, lvl zap.AtomicLevel, mode string) (zapcore
 		return nil, nil, fmt.Errorf("[GoFast] 无效的 log.mode %q，合法值: console, file, hybrid", mode)
 	}
 
-	return zapcore.NewTee(cores...), closers, nil
+	return cores, closers, nil
 }
 
 // =============================================================================
@@ -560,9 +608,11 @@ func (l *logger) WithError(err error) contracts.Log {
 }
 
 func (l *logger) WithContext(ctx context.Context) contracts.Log {
-	// zap 的 SugaredLogger 不直接支持 Context
-	// 基础实现：不做任何处理，子类可覆盖
-	return &logEntry{sugar: l.sugar}
+	fields := extractContextFields(ctx)
+	if len(fields) == 0 {
+		return &logEntry{sugar: l.sugar}
+	}
+	return &logEntry{sugar: l.sugar.With(fieldsToArgs(fields)...)}
 }
 
 // Close 刷新缓冲区并关闭底层 writer（如 lumberjack）。
@@ -651,5 +701,9 @@ func (e *logEntry) WithError(err error) contracts.Log {
 }
 
 func (e *logEntry) WithContext(ctx context.Context) contracts.Log {
-	return &logEntry{sugar: e.sugar}
+	fields := extractContextFields(ctx)
+	if len(fields) == 0 {
+		return &logEntry{sugar: e.sugar}
+	}
+	return &logEntry{sugar: e.sugar.With(fieldsToArgs(fields)...)}
 }
