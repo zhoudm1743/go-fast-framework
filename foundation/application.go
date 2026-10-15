@@ -9,7 +9,7 @@ import (
 	"github.com/zhoudm1743/go-fast-framework/contracts"
 )
 
-const Version = "1.3.0"
+const Version = "1.4.0"
 
 // Application 应用实例接口，嵌入 Container。
 type Application interface {
