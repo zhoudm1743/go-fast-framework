@@ -85,7 +85,16 @@ func (m *MockCache) GetBool(key string, def ...bool) bool {
 	if m.GetBoolFunc != nil {
 		return m.GetBoolFunc(key, def...)
 	}
-	return m.Get(key, def).(bool)
+	defs := make([]any, len(def))
+	for i, d := range def {
+		defs[i] = d
+	}
+	v := m.Get(key, defs...)
+	if v == nil {
+		return false
+	}
+	r, _ := v.(bool)
+	return r
 }
 
 func (m *MockCache) GetInt(key string, def ...int) int {
@@ -93,7 +102,16 @@ func (m *MockCache) GetInt(key string, def ...int) int {
 	if m.GetIntFunc != nil {
 		return m.GetIntFunc(key, def...)
 	}
-	return m.Get(key, def).(int)
+	defs := make([]any, len(def))
+	for i, d := range def {
+		defs[i] = d
+	}
+	v := m.Get(key, defs...)
+	if v == nil {
+		return 0
+	}
+	r, _ := v.(int)
+	return r
 }
 
 func (m *MockCache) GetInt64(key string, def ...int64) int64 {
@@ -101,7 +119,16 @@ func (m *MockCache) GetInt64(key string, def ...int64) int64 {
 	if m.GetInt64Func != nil {
 		return m.GetInt64Func(key, def...)
 	}
-	return m.Get(key, def).(int64)
+	defs := make([]any, len(def))
+	for i, d := range def {
+		defs[i] = d
+	}
+	v := m.Get(key, defs...)
+	if v == nil {
+		return 0
+	}
+	r, _ := v.(int64)
+	return r
 }
 
 func (m *MockCache) GetFloat64(key string, def ...float64) float64 {
@@ -109,7 +136,16 @@ func (m *MockCache) GetFloat64(key string, def ...float64) float64 {
 	if m.GetFloat64Func != nil {
 		return m.GetFloat64Func(key, def...)
 	}
-	return m.Get(key, def).(float64)
+	defs := make([]any, len(def))
+	for i, d := range def {
+		defs[i] = d
+	}
+	v := m.Get(key, defs...)
+	if v == nil {
+		return 0
+	}
+	r, _ := v.(float64)
+	return r
 }
 
 func (m *MockCache) GetString(key string, def ...string) string {
@@ -117,7 +153,16 @@ func (m *MockCache) GetString(key string, def ...string) string {
 	if m.GetStringFunc != nil {
 		return m.GetStringFunc(key, def...)
 	}
-	return m.Get(key, def).(string)
+	defs := make([]any, len(def))
+	for i, d := range def {
+		defs[i] = d
+	}
+	v := m.Get(key, defs...)
+	if v == nil {
+		return ""
+	}
+	r, _ := v.(string)
+	return r
 }
 
 func (m *MockCache) Has(key string) bool {
